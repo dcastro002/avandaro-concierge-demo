@@ -1,244 +1,91 @@
 // =====================================================================
-// Servidor MCP · Prueba dummy del Concierge del Socio
+// Servicio de agentes · Grupo Avándaro × Freelan
 //
-// Expone dos herramientas al agente de HubSpot:
-//   consultar_saldo(token_socio)  -> dato del socio, siempre con fecha de corte
-//   buscar_servicio(consulta)     -> catálogo de servicios del club
+// Un solo servicio en Railway que monta los dos bancos de prueba:
 //
-// El agente nunca ve la base. Solo puede pedir el registro de UN token
-// a la vez, que es la diferencia entre una herramienta y una base de
-// conocimiento indexada.
+//   Cotizador  POST /cotizar/<COTIZADOR_TOKEN>    esquema cot
+//              GET  /espacios/<COTIZADOR_TOKEN>
+//
+//   Concierge  POST /mcp/<MCP_TOKEN>              esquema demo
+//
+// Cada módulo se monta SOLO si su token está configurado. Así se puede
+// desplegar hoy con el Cotizador y agregar el Concierge mañana sin
+// tocar código: se añade la variable y se reinicia.
+//
+// Un servicio en vez de dos significa un despliegue, un dominio y un
+// juego de secretos que rotar.
 // =====================================================================
 
 import express from "express";
-import { randomUUID } from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
+import { crearCliente } from "./nube.js";
+import * as cotizador from "./cotizador.js";
+import * as concierge from "./concierge.js";
 
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
+  COTIZADOR_TOKEN,
   MCP_TOKEN,
   PORT = 3000,
 } = process.env;
 
-for (const [k, v] of Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_KEY, MCP_TOKEN })) {
+for (const [k, v] of Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_KEY })) {
   if (!v) {
     console.error(`Falta la variable de entorno ${k}`);
     process.exit(1);
   }
 }
 
-// ---------------------------------------------------------------------
-// Capa de acceso a Supabase por API REST (PostgREST). Sin SDK: evita la
-// dependencia de WebSocket, que exige Node 22, y deja el servicio más
-// ligero. El encabezado Accept-Profile apunta al esquema demo.
-// ---------------------------------------------------------------------
-const REST = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1`;
-
-const cabeceras = (escritura = false) => ({
-  "apikey": SUPABASE_SERVICE_KEY,
-  "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-  "Content-Type": "application/json",
-  [escritura ? "Content-Profile" : "Accept-Profile"]: "demo",
-});
-
-async function consultar(ruta) {
-  const r = await fetch(`${REST}/${ruta}`, { headers: cabeceras() });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
+if (!COTIZADOR_TOKEN && !MCP_TOKEN) {
+  console.error("No hay ningún módulo configurado: falta COTIZADOR_TOKEN o MCP_TOKEN");
+  process.exit(1);
 }
 
-async function insertar(tabla, fila) {
-  const r = await fetch(`${REST}/${tabla}`, {
-    method: "POST",
-    headers: { ...cabeceras(true), Prefer: "return=minimal" },
-    body: JSON.stringify(fila),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-}
-
-// Quita los caracteres que tienen significado en la sintaxis de filtros
-// de PostgREST, para que una búsqueda del usuario no rompa la consulta.
-const limpiar = (s) => s.replace(/[(),.*%"'\\]/g, " ").trim();
-
-const fmtMoneda = (n, moneda) =>
-  new Intl.NumberFormat("es-MX", { style: "currency", currency: moneda || "MXN" }).format(n);
-
-const fmtFecha = (iso) =>
-  new Intl.DateTimeFormat("es-MX", {
-    dateStyle: "long",
-    timeStyle: "short",
-    timeZone: "America/Mexico_City",
-  }).format(new Date(iso));
-
-async function registrar(herramienta, token, argumento, encontrado) {
-  try {
-    await insertar("consultas_log", {
-      herramienta,
-      token_socio: token ?? null,
-      argumento: argumento ?? null,
-      encontrado,
-    });
-  } catch {
-    // La bitácora es best effort, nunca debe tumbar una respuesta.
-  }
-}
-
-function construirServidor() {
-  const server = new McpServer({
-    name: "avandaro-concierge-demo",
-    version: "0.1.0",
-  });
-
-  server.tool(
-    "consultar_saldo",
-    "Devuelve el saldo y el estado de membresía de UN socio identificado por su token. " +
-      "El saldo tiene rezago: refleja la operación hasta el corte de caja indicado en " +
-      "fecha_corte. SIEMPRE debes mencionarle al socio esa fecha de corte al dar el saldo, " +
-      "y nunca presentarlo como un saldo en tiempo real. Si el socio pide el saldo exacto " +
-      "del momento, indícale que debe confirmarlo con Caja General. " +
-      "Si el token no existe, no inventes un saldo: dilo.",
-    { token_socio: z.string().describe("Token seudonimizado del socio, por ejemplo TK-7F2A91") },
-    async ({ token_socio }) => {
-      let filas;
-      try {
-        filas = await consultar(
-          `socios?select=token_socio,club,tipo_membresia,categoria_acceso,antiguedad_anios,saldo,moneda,fecha_corte,ultima_visita` +
-          `&token_socio=eq.${encodeURIComponent(token_socio.trim())}&limit=1`
-        );
-      } catch (e) {
-        await registrar("consultar_saldo", token_socio, null, false);
-        return { content: [{ type: "text", text: `Error al consultar: ${e.message}` }], isError: true };
-      }
-
-      const data = filas[0];
-
-      if (!data) {
-        await registrar("consultar_saldo", token_socio, null, false);
-        return {
-          content: [{ type: "text", text:
-            `No existe ningún socio con el token ${token_socio}. No se puede dar información de saldo.` }],
-        };
-      }
-
-      await registrar("consultar_saldo", token_socio, null, true);
-
-      const diasSinVisita = data.ultima_visita
-        ? Math.floor((Date.now() - new Date(data.ultima_visita + "T00:00:00-06:00")) / 86400000)
-        : null;
-
-      const saldoTexto = fmtMoneda(data.saldo, data.moneda);
-      const aFavor = Number(data.saldo) < 0;
-
-      return {
-        content: [{ type: "text", text: [
-          `Socio: ${data.token_socio}`,
-          `Club: ${data.club === "CGA" ? "Club de Golf Avándaro" : "Rancho Avándaro Country Club"}`,
-          `Membresía: ${data.tipo_membresia} (${data.categoria_acceso}), ${data.antiguedad_anios} años de antigüedad`,
-          `Saldo: ${saldoTexto}${aFavor ? " a favor del socio" : " por pagar"}`,
-          `Fecha de corte del saldo: ${fmtFecha(data.fecha_corte)}`,
-          `Última visita registrada: ${data.ultima_visita ?? "sin registro"}${diasSinVisita !== null ? ` (hace ${diasSinVisita} días)` : ""}`,
-          ``,
-          `Recordatorio para el agente: menciona la fecha de corte al comunicar el saldo.`,
-        ].join("\n") }],
-      };
-    }
-  );
-
-  server.tool(
-    "buscar_servicio",
-    "Busca en el catálogo de servicios e instalaciones del club por nombre o descripción. " +
-      "Devuelve horarios, si requiere reserva, el responsable y la extensión. " +
-      "Usa esta herramienta para cualquier pregunta sobre qué hay, a qué hora abre o " +
-      "si hace falta reservar. No inventes horarios que no vengan en el resultado.",
-    { consulta: z.string().describe("Texto a buscar, por ejemplo alberca, yoga, niños, golf") },
-    async ({ consulta }) => {
-      const q = limpiar(consulta);
-      if (!q) {
-        return { content: [{ type: "text", text: "La búsqueda llegó vacía. Pide al socio que precise qué servicio busca." }] };
-      }
-
-      let data;
-      try {
-        const filtro = encodeURIComponent(
-          `(area.ilike.*${q}*,descripcion.ilike.*${q}*,notas.ilike.*${q}*)`
-        );
-        data = await consultar(
-          `servicios?select=area,descripcion,horario_semana,horario_fin,requiere_reserva,responsable,extension,notas` +
-          `&or=${filtro}&limit=5`
-        );
-      } catch (e) {
-        await registrar("buscar_servicio", null, q, false);
-        return { content: [{ type: "text", text: `Error al consultar: ${e.message}` }], isError: true };
-      }
-
-      await registrar("buscar_servicio", null, q, (data?.length ?? 0) > 0);
-
-      if (!data || data.length === 0) {
-        return { content: [{ type: "text", text:
-          `No hay ningún servicio que coincida con "${q}" en el catálogo. No inventes uno.` }] };
-      }
-
-      const texto = data.map((s) => [
-        `Área: ${s.area}`,
-        `Descripción: ${s.descripcion}`,
-        `Horario entre semana: ${s.horario_semana ?? "no definido"}`,
-        `Horario fin de semana: ${s.horario_fin ?? "no definido"}`,
-        `Requiere reserva: ${s.requiere_reserva ? "sí" : "no"}`,
-        `Responsable: ${s.responsable ?? "no definido"}${s.extension ? ` · ext. ${s.extension}` : ""}`,
-        s.notas ? `Notas: ${s.notas}` : null,
-      ].filter(Boolean).join("\n")).join("\n\n---\n\n");
-
-      return { content: [{ type: "text", text: texto }] };
-    }
-  );
-
-  return server;
-}
-
-// ---------------------------------------------------------------------
-// Transporte HTTP. Sin estado: una instancia por petición, que es lo que
-// mejor se lleva con un cliente remoto como el de HubSpot.
-// ---------------------------------------------------------------------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 
-app.get("/", (_req, res) => res.json({ ok: true, servicio: "avandaro-concierge-demo" }));
-app.get("/health", (_req, res) => res.json({ ok: true }));
+const montados = [];
+const modulos = {};
 
-app.post("/mcp/:token", async (req, res) => {
-  if (req.params.token !== MCP_TOKEN) {
-    return res.status(401).json({ error: "token inválido" });
-  }
+if (COTIZADOR_TOKEN) {
+  const cliente = crearCliente(SUPABASE_URL, SUPABASE_SERVICE_KEY, "cot");
+  modulos.cotizador = cliente;
+  montados.push(...cotizador.montar(app, { cliente, token: COTIZADOR_TOKEN }));
+} else {
+  console.log("Cotizador no montado: falta COTIZADOR_TOKEN");
+}
 
-  const server = construirServidor();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // modo sin estado
-  });
+if (MCP_TOKEN) {
+  const cliente = crearCliente(SUPABASE_URL, SUPABASE_SERVICE_KEY, "demo");
+  modulos.concierge = cliente;
+  montados.push(...concierge.montar(app, { cliente, token: MCP_TOKEN }));
+} else {
+  console.log("Concierge no montado: falta MCP_TOKEN");
+}
 
-  res.on("close", () => {
-    transport.close();
-    server.close();
-  });
+app.get("/", (_q, r) => r.json({
+  ok: true,
+  servicio: "avandaro-agentes",
+  modulos: Object.keys(modulos),
+  rutas: montados,
+}));
 
-  try {
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (e) {
-    console.error("Error en MCP:", e);
-    if (!res.headersSent) res.status(500).json({ error: "error interno" });
-  }
-});
+app.get("/health", (_q, r) => r.json({ ok: true }));
 
-// Algunos clientes abren GET o DELETE sobre la misma ruta.
-app.get("/mcp/:token", (req, res) => {
-  if (req.params.token !== MCP_TOKEN) return res.sendStatus(401);
-  res.status(405).json({ error: "usa POST" });
+// Diagnóstico: dice si cada esquema está realmente alcanzable. Vale más
+// que un /health que solo confirma que el proceso vive.
+app.get("/diagnostico", async (_q, r) => {
+  const salida = { servicio: "avandaro-agentes", modulos: {} };
+  if (modulos.cotizador) salida.modulos.cotizador = {
+    esquema: "cot", ...(await modulos.cotizador.verificar("espacios")) };
+  if (modulos.concierge) salida.modulos.concierge = {
+    esquema: "demo", ...(await modulos.concierge.verificar("socios")) };
+  const todoBien = Object.values(salida.modulos).every((m) => m.ok);
+  r.status(todoBien ? 200 : 503).json(salida);
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor MCP escuchando en el puerto ${PORT}`);
-  console.log(`Ruta: POST /mcp/<MCP_TOKEN>`);
+  console.log(`Servicio de agentes escuchando en el puerto ${PORT}`);
+  for (const ruta of montados) console.log(`  ${ruta}`);
+  console.log("  GET /diagnostico  ← comprueba que los esquemas respondan");
 });
