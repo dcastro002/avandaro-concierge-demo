@@ -479,11 +479,17 @@ async function buscarEnHotel(kb, busqueda) {
   if (!limpio) return { ok: false, error: "Falta qué buscar." };
   const t = encodeURIComponent(limpio);
 
+  // Las vistas v_ van primero: son las curadas, las que ya excluyen el
+  // dato sin confirmar. Ordenar importa porque solo se revisan unas
+  // cuantas, y por orden alfabético las v_ quedaban al final, o sea
+  // fuera del corte. Cada vista es un viaje a Supabase mientras la
+  // persona espera en su chat.
+  const porRevisar = Object.entries(kbMapa)
+    .sort((a, b) => (b[0].startsWith("v_") ? 1 : 0) - (a[0].startsWith("v_") ? 1 : 0))
+    .slice(0, 10);
+
   const hallazgos = [];
-  // Se revisan pocas vistas y se corta en cuanto hay con qué contestar.
-  // Cada vista es un viaje a Supabase, y esto corre dentro del tiempo
-  // que el cliente está esperando en su chat.
-  for (const [tabla, info] of Object.entries(kbMapa).slice(0, 8)) {
+  for (const [tabla, info] of porRevisar) {
     if (hallazgos.length >= 6) break;
     if (!info.texto.length) continue;
     const o = info.texto.map((c) => `${c}.ilike.*${t}*`).join(",");
@@ -708,6 +714,29 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
     if (!cerebro.disponible()) return res.json({ ok: false, motivo: "No hay GEMINI_API_KEY; se contesta con reglas." });
     try {
       res.json({ ok: true, usando: cerebro.MODELO_POR_DEFECTO, disponibles: await cerebro.listarModelos() });
+    } catch (e) {
+      res.status(502).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Sonda de la base de conocimiento: qué vistas descubrió y qué
+  // devuelve una búsqueda. Sin esto, cuando el agente dice "no lo
+  // tengo" no hay forma de saber si es que no está el dato o si no
+  // estamos mirando donde debemos.
+  app.get("/whatsapp/kb/:token", async (req, res) => {
+    if (req.params.token !== token) return res.status(401).json({ error: "token inválido" });
+    if (!kb) return res.json({ ok: false, motivo: "El esquema kb no está conectado." });
+    try {
+      kbMapa = await kb.describir();   // se refresca a propósito
+      const salida = {
+        ok: true,
+        vistas: Object.fromEntries(Object.entries(kbMapa).map(([t, i]) => [t, i.texto])),
+      };
+      if (req.query.busqueda) {
+        salida.busqueda = req.query.busqueda;
+        salida.resultado = await buscarEnHotel(kb, String(req.query.busqueda));
+      }
+      res.json(salida);
     } catch (e) {
       res.status(502).json({ ok: false, error: e.message });
     }
