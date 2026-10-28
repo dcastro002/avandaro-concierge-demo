@@ -641,7 +641,7 @@ async function cargarEstado(wa_id, cliente) {
   return st;
 }
 
-export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos }) {
+export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos, emitir }) {
   const { wa_id, texto, nombre } = entrada;
   const st = await cargarEstado(wa_id, cliente);
 
@@ -657,28 +657,52 @@ export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos 
     sistema: SISTEMA + `\n\nHoy es ${new Date().toISOString().slice(0, 10)}.`,
     herramientas: HERRAMIENTAS,
     ejecutar: hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }),
+    emitir,
   });
 
   st.historial = cerebro.recortar(salida.historial, 16);
   st.actualizado = Date.now();
 
-  // Primero las cifras que calculó el motor, después el comentario del
-  // modelo. Al revés, el cliente lee "ahí le va" antes de tener nada.
-  const mensajes = [...salida.directos, ...salida.mensajes];
-  if (!mensajes.length) mensajes.push("Disculpe, no entendí. ¿Me repite qué necesita?");
+  // Si hay por dónde enviar sobre la marcha, las cifras ya salieron
+  // mientras el modelo redactaba, y aquí solo queda su comentario.
+  // Sin esa vía (el simulador), se devuelve todo junto y en orden.
+  const mensajes = emitir ? [...salida.mensajes] : [...salida.directos, ...salida.mensajes];
+  if (!mensajes.length && !salida.directos.length) {
+    mensajes.push("Disculpe, no entendí. ¿Me repite qué necesita?");
+  }
 
   return { mensajes, estado: st, via: "gemini", herramientas: salida.usadas };
 }
 
-// Despacho. Si no hay llave, o si el modelo falla, la capa de reglas
-// contesta igual. El demo no se cae porque Google tenga un mal día.
+// Despacho.
+//
+// La capa de reglas es el respaldo, pero SOLO al empezar. A media
+// conversación no sirve: tiene su propia memoria, distinta de la del
+// modelo, así que contesta ignorando lo que la persona ya dijo y el
+// modelo, al volver, vuelve a preguntar lo mismo. Dos motores
+// alternándose se sienten peor que uno fallando con honestidad.
+//
+// Si el modelo falla con un hilo ya abierto, se pide repetir. El
+// historial queda intacto y la siguiente vuelta continúa donde iba.
 export async function responder(entrada, deps) {
   if (!cerebro.disponible()) return responderConReglas(entrada, deps);
+
+  const st = await cargarEstado(entrada.wa_id, deps.cliente);
+  const hiloAbierto = (st.historial?.length ?? 0) > 0;
+
   try {
     return await responderConIA(entrada, deps);
   } catch (e) {
-    console.error("El cerebro falló, se contesta con reglas:", e.message);
-    return responderConReglas(entrada, deps);
+    console.error("El cerebro falló:", e.message);
+    if (!hiloAbierto) {
+      console.log("Hilo nuevo: contesta la capa de reglas.");
+      return responderConReglas(entrada, deps);
+    }
+    return {
+      mensajes: ["Disculpe, se me trabó el sistema un momento. ¿Me repite lo último, por favor?"],
+      estado: st,
+      via: "respaldo",
+    };
   }
 }
 
@@ -716,6 +740,20 @@ export function variantesDestino(numero) {
   if (/^521\d{10}$/.test(n)) return [n.replace(/^521/, "52"), n];
   if (/^52\d{10}$/.test(n)) return [n, n.replace(/^52/, "521")];
   return [n];
+}
+
+// Palomitas azules de inmediato. No acelera la respuesta, pero la
+// espera se siente distinta cuando sabes que del otro lado ya leyeron.
+async function marcarLeido(config, id) {
+  if (!config.phoneNumberId || !config.graphToken || !id) return;
+  const version = config.graphVersion || process.env.WA_GRAPH_VERSION || "v25.0";
+  try {
+    await fetch(`https://graph.facebook.com/${version}/${config.phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.graphToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: id }),
+    });
+  } catch { /* es cosmético: que nunca estorbe la respuesta */ }
 }
 
 async function enviar(config, para, texto) {
@@ -861,10 +899,19 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
               continue;
             }
             const nombre = v.contacts?.[0]?.profile?.name;
+
+            // Sin await: las palomitas azules salen mientras pensamos.
+            marcarLeido(config, msg.id);
+
             const r = await responder(
-              { wa_id: msg.from, texto: msg.text.body, nombre }, deps);
-            await persistir(cliente, r.estado);
+              { wa_id: msg.from, texto: msg.text.body, nombre },
+              { ...deps, emitir: (m) => enviar(config, msg.from, m) });
+
             for (const m of r.mensajes) await enviar(config, msg.from, m);
+
+            // Guardar va al final y sin esperarlo: es para la siguiente
+            // vuelta, no para esta, y nadie debe esperar por ello.
+            persistir(cliente, r.estado).catch(() => {});
           }
         }
       }

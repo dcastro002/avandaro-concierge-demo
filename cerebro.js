@@ -65,6 +65,28 @@ export async function listarModelos(llave = process.env.GEMINI_API_KEY) {
 // lanza error. Mejor fallar rápido y contestar con reglas.
 const LIMITE_MS = Number(process.env.GEMINI_TIMEOUT_MS || 18000);
 
+// Modelos de respaldo. Una saturación momentánea de Google no debería
+// tumbar la conversación: se reintenta con otro modelo antes de rendirse.
+export const RESPALDOS = (process.env.GEMINI_MODELOS_RESPALDO || "gemini-3.1-flash-lite")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+const TRANSITORIO = new Set([429, 500, 502, 503, 504]);
+
+async function generarConRespaldo(cuerpo, modelos, llave) {
+  let ultimo;
+  for (let i = 0; i < modelos.length; i++) {
+    try {
+      return await generar(cuerpo, modelos[i], llave);
+    } catch (e) {
+      ultimo = e;
+      const vale = TRANSITORIO.has(e.estado) || /no contestó en/.test(e.message);
+      if (!vale || i === modelos.length - 1) throw e;
+      console.log(`${modelos[i]} falló (${e.estado ?? "tiempo"}); se reintenta con ${modelos[i + 1]}.`);
+    }
+  }
+  throw ultimo;
+}
+
 async function generar(cuerpo, modelo, llave) {
   let r;
   try {
@@ -147,6 +169,7 @@ export async function conversar({
   sistema,
   herramientas = [],
   ejecutar,
+  emitir,
   modelo = MODELO_POR_DEFECTO,
   llave = process.env.GEMINI_API_KEY,
   maxVueltas = 3,
@@ -172,7 +195,8 @@ export async function conversar({
     };
     if (herramientas.length) cuerpo.tools = [{ functionDeclarations: herramientas }];
 
-    const respuesta = await generar(cuerpo, modelo, llave);
+    const respuesta = await generarConRespaldo(
+      cuerpo, [modelo, ...RESPALDOS.filter((m) => m !== modelo)], llave);
     const ps = partes(respuesta);
 
     const llamadas = ps.filter((p) => p.functionCall).map((p) => p.functionCall);
@@ -201,7 +225,13 @@ export async function conversar({
       try {
         const salida = await ejecutar(c.name, c.args || {});
         resultado = salida?.resultado ?? salida ?? {};
-        if (salida?.mensajesDirectos?.length) directos.push(...salida.mensajesDirectos);
+        if (salida?.mensajesDirectos?.length) {
+          directos.push(...salida.mensajesDirectos);
+          // La cotización sale AHORA, no cuando el modelo termine de
+          // redactar su comentario. Son dos segundos de diferencia en
+          // el único mensaje que de verdad le importa a quien espera.
+          if (emitir) for (const m of salida.mensajesDirectos) await emitir(m);
+        }
       } catch (e) {
         console.error(`Herramienta ${c.name} falló:`, e.message);
         resultado = { ok: false, error: "La herramienta no está disponible en este momento." };
