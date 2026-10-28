@@ -713,6 +713,28 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
     }
   });
 
+  // Sonda: prueba uno o varios modelos, con y sin herramientas, para
+  // aislar qué se atora. Los modelos van separados por coma.
+  //
+  //   /whatsapp/probar/<token>?modelos=a,b,c&sistema=1&herramientas=1
+  app.get("/whatsapp/probar/:token", async (req, res) => {
+    if (req.params.token !== token) return res.status(401).json({ error: "token inválido" });
+    if (!cerebro.disponible()) return res.json({ ok: false, motivo: "No hay GEMINI_API_KEY." });
+
+    const modelos = String(req.query.modelos || cerebro.MODELO_POR_DEFECTO)
+      .split(",").map((s) => s.trim()).filter(Boolean).slice(0, 6);
+
+    const salida = [];
+    for (const modelo of modelos) {
+      salida.push(await cerebro.probar({
+        modelo,
+        sistema: req.query.sistema === "1",
+        herramientas: req.query.herramientas === "1" ? HERRAMIENTAS : null,
+      }));
+    }
+    res.json({ ok: true, pruebas: salida });
+  });
+
   // Alta del webhook en el panel de Meta.
   app.get("/whatsapp/webhook", (req, res) => {
     if (req.query["hub.mode"] === "subscribe" &&
@@ -764,7 +786,23 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
   app.post("/whatsapp/simular/:token", async (req, res) => {
     if (req.params.token !== token) return res.status(401).json({ error: "token inválido" });
     const { de = "simulador", texto = "", reiniciar } = req.body ?? {};
-    if (reiniciar) ESTADOS.delete(de);
+
+    // Borrar solo la memoria no alcanza: el estado también vive en
+    // Supabase, y al releerlo volvían los datos de la conversación
+    // anterior. Hay que limpiar los dos.
+    if (reiniciar) {
+      ESTADOS.delete(de);
+      if (cliente) {
+        try {
+          await cliente.guardar("conversaciones", {
+            wa_id: de, datos: {}, esperando: null, preguntado: [],
+            actualizado: new Date().toISOString(),
+          }, "wa_id");
+        } catch (e) {
+          console.error("No se pudo limpiar la conversación:", e.message);
+        }
+      }
+    }
     try {
       const r = await responder({ wa_id: de, texto, nombre: "Simulador" }, deps);
       ESTADOS.set(de, r.estado);

@@ -81,6 +81,39 @@ function partes(respuesta) {
   return respuesta?.candidates?.[0]?.content?.parts ?? [];
 }
 
+// ---------------------------------------------------------------------
+// Sonda
+//
+// Prueba un modelo con lo mínimo y va agregando piezas, para aislar qué
+// es lo que se atora: el modelo, las instrucciones de sistema o las
+// herramientas. Cada combinación se prueba desde curl, sin desplegar.
+// ---------------------------------------------------------------------
+export async function probar({ modelo, sistema = false, herramientas = null,
+                               llave = process.env.GEMINI_API_KEY, limite = 12000 } = {}) {
+  const cuerpo = { contents: [{ role: "user", parts: [{ text: "Contesta solo: hola" }] }] };
+  if (sistema) cuerpo.systemInstruction = { parts: [{ text: "Eres conciso." }] };
+  if (herramientas?.length) cuerpo.tools = [{ functionDeclarations: herramientas }];
+
+  const arranque = Date.now();
+  try {
+    const r = await fetch(
+      `${RAIZ}/models/${encodeURIComponent(modelo)}:generateContent?key=${encodeURIComponent(llave)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo), signal: AbortSignal.timeout(limite) });
+    const texto = await r.text();
+    const ms = Date.now() - arranque;
+    if (!r.ok) return { modelo, ok: false, ms, estado: r.status, error: texto.slice(0, 220) };
+    const d = JSON.parse(texto);
+    const dijo = (d?.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => p.text).filter(Boolean).join(" ").trim();
+    return { modelo, ok: true, ms, dijo: dijo || "(sin texto)" };
+  } catch (e) {
+    const ms = Date.now() - arranque;
+    const porTiempo = e.name === "TimeoutError" || e.name === "AbortError";
+    return { modelo, ok: false, ms, error: porTiempo ? `colgado, cortado a los ${ms} ms` : e.message };
+  }
+}
+
 /**
  * Conversa una vuelta.
  *
