@@ -10,6 +10,7 @@
 // =====================================================================
 
 import { randomUUID } from "node:crypto";
+import { respuestaVoz, aFechaISO, aNumero, resolverClave, AVISO_FIJO } from "./voz.js";
 
 let db = null;
 
@@ -289,6 +290,37 @@ export function montar(app, { cliente, token }) {
   const autoriza = (req, res, next) =>
     req.params.token === token ? next() : res.status(401).json({ error: "token inválido" });
 
+  // Aircall manda el secreto en la cabecera, no en la ruta. Soporta
+  // Bearer, y también una API Key con el nombre de cabecera que uno
+  // elija; aceptamos las dos formas para no depender de cómo quede
+  // configurado su panel.
+  const autorizaCabecera = (req, res, next) => {
+    const encabezado = (req.get("authorization") || "").trim();
+    const m = /^Bearer\s+(.+)$/i.exec(encabezado);
+    const dado = m ? m[1].trim() : (req.get("x-api-key") || "").trim();
+    if (dado && dado === token) return next();
+    res.set("WWW-Authenticate", "Bearer");
+    res.status(401).json({ ok: false, error: "token inválido" });
+  };
+
+  // La bitácora es la misma para los tres caminos. Si un agente dice un
+  // número que no está en esta tabla, se lo inventó.
+  const bitacora = async (peticion, salida, origen) => {
+    try {
+      await db.insertar("cotizaciones", {
+        folio: salida.folio ?? `ERR-${randomUUID().slice(0, 8)}`,
+        origen,
+        hubspot_deal: peticion.deal_id ?? null,
+        peticion,
+        respuesta: salida,
+        total: salida.importes?.total ?? null,
+        error: salida.ok ? null : (salida.errores || []).join(" · "),
+      });
+    } catch (e) {
+      console.error("No se pudo escribir la bitácora:", e.message);
+    }
+  };
+
   // Catálogo, para que el workflow o una persona vean qué se puede pedir.
   app.get("/espacios/:token", autoriza, async (_q, r) => {
     try {
@@ -336,5 +368,90 @@ export function montar(app, { cliente, token }) {
     res.status(salida.ok ? 200 : 422).json(salida);
   });
 
-  return ["POST /cotizar/:token", "GET /espacios/:token"];
+  // -------------------------------------------------------------------
+  // Camino de voz, para el AI Voice Agent de Aircall
+  //
+  // Aircall pide un endpoint HTTPS propio, autenticado por cabecera, y
+  // mapea la respuesta con JSONPath. Por eso esta ruta devuelve una
+  // estructura plana y en letra, no el desglose completo.
+  // -------------------------------------------------------------------
+
+  // Para el botón "Test Connection" del método de autenticación. Solo
+  // comprueba credenciales, no ejecuta nada.
+  app.get("/voz/ping", autorizaCabecera, (_q, r) =>
+    r.json({ ok: true, mensaje: "Autenticación correcta." }));
+
+  app.post("/voz/cotizar", autorizaCabecera, async (req, res) => {
+    const cuerpo = req.body ?? {};
+
+    // Lo que recolecta el agente hablando llega como texto, la fecha
+    // llega como la haya dicho la persona, y los catálogos llegan en
+    // palabras, no en claves.
+    let c;
+    try {
+      c = await catalogos();
+    } catch (e) {
+      console.error("No se pudo leer el catálogo:", e.message);
+      return res.json({
+        ok: false, folio: "", total: "", resumen: "", aviso: AVISO_FIJO,
+        error: "No puedo consultar el tarifario en este momento.",
+      });
+    }
+
+    const peticion = {
+      origen: "aircall",
+      deal_id: cuerpo.deal_id ?? null,
+      fecha_inicio: aFechaISO(cuerpo.fecha_inicio ?? cuerpo.fecha_evento),
+      personas: aNumero(cuerpo.personas),
+      dias: aNumero(cuerpo.dias) ?? 1,
+      habitaciones: aNumero(cuerpo.habitaciones) ?? 0,
+      noches: aNumero(cuerpo.noches) ?? 0,
+      espacio: resolverClave(cuerpo.espacio, c.espacios, "clave"),
+      paquete_ayb: resolverClave(cuerpo.paquete_ayb ?? cuerpo.alimentos, c.paquetes, "clave"),
+      tipo_habitacion: resolverClave(cuerpo.tipo_habitacion, c.hospedaje, "tipo_habitacion"),
+      montaje: cuerpo.montaje || undefined,
+    };
+
+    let salida;
+    try {
+      salida = await cotizar(peticion);
+    } catch (e) {
+      console.error("Error al cotizar por voz:", e);
+      salida = { ok: false, errores: [`Error interno: ${e.message}`] };
+    }
+
+    await bitacora(peticion, salida, "aircall");
+
+    // A propósito se responde 200 aunque la cotización no proceda.
+    // Aircall trata cualquier respuesta fuera de 2xx como falla de la
+    // acción y el agente se disculpa sin saber por qué. Devolviendo 200
+    // con ok en false, el agente puede DECIR qué le faltó y pedirlo.
+    if (!salida.ok) {
+      return res.json({
+        ok: false,
+        folio: "",
+        total: "",
+        resumen: "",
+        aviso: AVISO_FIJO,
+        error: (salida.errores || ["No se pudo cotizar."]).join(" "),
+      });
+    }
+
+    res.json(respuestaVoz(salida));
+  });
+
+  return [
+    "POST /cotizar/:token",
+    "GET /espacios/:token",
+    "POST /voz/cotizar  (Bearer)",
+    "GET /voz/ping  (Bearer)",
+  ];
 }
+
+// El hilo de WhatsApp necesita el mismo motor y el mismo catálogo. Se
+// exportan en vez de duplicarlos, que es justamente lo que haría que un
+// canal empezara a dar precios distintos del otro.
+//
+// Dependen de que cotizador.montar() haya corrido antes, porque ahí se
+// inyecta el cliente de Supabase. server.js respeta ese orden.
+export { cotizar, catalogos };

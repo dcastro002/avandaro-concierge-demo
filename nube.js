@@ -39,6 +39,18 @@ export function crearCliente(urlBase, llave, esquema) {
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   }
 
+  // Alta o actualización en un solo viaje. La usa el hilo de WhatsApp,
+  // que reescribe el estado de la conversación en cada mensaje.
+  async function guardar(tabla, fila, conflicto) {
+    const q = conflicto ? `?on_conflict=${encodeURIComponent(conflicto)}` : "";
+    const r = await fetch(`${REST}/${tabla}${q}`, {
+      method: "POST",
+      headers: { ...cabeceras(true), Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(fila),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  }
+
   // Comprueba que el esquema esté expuesto y que la llave sirva, antes
   // de que lo descubra HubSpot en medio de una demo.
   async function verificar(tabla) {
@@ -50,5 +62,5 @@ export function crearCliente(urlBase, llave, esquema) {
     }
   }
 
-  return { esquema, consultar, insertar, verificar };
+  return { esquema, consultar, insertar, guardar, verificar };
 }

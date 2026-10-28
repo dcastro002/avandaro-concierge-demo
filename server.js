@@ -20,12 +20,18 @@ import express from "express";
 import { crearCliente } from "./nube.js";
 import * as cotizador from "./cotizador.js";
 import * as concierge from "./concierge.js";
+import * as whatsapp from "./whatsapp.js";
 
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
   COTIZADOR_TOKEN,
   MCP_TOKEN,
+  WHATSAPP_TOKEN,
+  WA_VERIFY_TOKEN,
+  WA_APP_SECRET,
+  WA_PHONE_ID,
+  WA_GRAPH_TOKEN,
   PORT = 3000,
 } = process.env;
 
@@ -42,7 +48,14 @@ if (!COTIZADOR_TOKEN && !MCP_TOKEN) {
 }
 
 const app = express();
-app.use(express.json({ limit: "256kb" }));
+
+// El cuerpo crudo se guarda porque Meta firma cada entrega de WhatsApp
+// con HMAC sobre los bytes exactos. Reserializar el JSON cambia espacios
+// y orden, y la firma deja de cuadrar.
+app.use(express.json({
+  limit: "256kb",
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 
 const montados = [];
 const modulos = {};
@@ -53,6 +66,29 @@ if (COTIZADOR_TOKEN) {
   montados.push(...cotizador.montar(app, { cliente, token: COTIZADOR_TOKEN }));
 } else {
   console.log("Cotizador no montado: falta COTIZADOR_TOKEN");
+}
+
+// WhatsApp usa el motor del Cotizador, así que va después y solo si
+// aquel quedó montado.
+if (WHATSAPP_TOKEN && COTIZADOR_TOKEN) {
+  montados.push(...whatsapp.montar(app, {
+    cliente: modulos.cotizador,
+    token: WHATSAPP_TOKEN,
+    cotizar: cotizador.cotizar,
+    catalogos: cotizador.catalogos,
+    config: {
+      verifyToken: WA_VERIFY_TOKEN,
+      appSecret: WA_APP_SECRET,
+      phoneNumberId: WA_PHONE_ID,
+      graphToken: WA_GRAPH_TOKEN,
+    },
+  }));
+  modulos.whatsapp = modulos.cotizador;
+  if (!WA_PHONE_ID || !WA_GRAPH_TOKEN) {
+    console.log("WhatsApp montado en modo simulador: falta WA_PHONE_ID o WA_GRAPH_TOKEN");
+  }
+} else if (WHATSAPP_TOKEN) {
+  console.log("WhatsApp no montado: necesita COTIZADOR_TOKEN, porque usa su motor");
 }
 
 if (MCP_TOKEN) {

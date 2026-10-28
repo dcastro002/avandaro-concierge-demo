@@ -84,17 +84,30 @@ const DATOS = {
 };
 
 const bitacora = [];
+const conversaciones = new Map();   // el hilo de WhatsApp, que sí se relee
 
 // --- PostgREST falso -------------------------------------------------
 const fake = http.createServer((req, res) => {
   const tabla = req.url.split("?")[0].replace("/rest/v1/", "");
+
   if (req.method === "POST") {
     let cuerpo = "";
     req.on("data", (c) => (cuerpo += c));
-    req.on("end", () => { bitacora.push(JSON.parse(cuerpo)); res.writeHead(201).end(); });
+    req.on("end", () => {
+      const fila = JSON.parse(cuerpo);
+      if (tabla === "conversaciones") conversaciones.set(fila.wa_id, fila);
+      else bitacora.push(fila);
+      res.writeHead(201).end();
+    });
     return;
   }
+
   res.writeHead(200, { "Content-Type": "application/json" });
+  if (tabla === "conversaciones") {
+    const m = /wa_id=eq\.([^&]+)/.exec(req.url);
+    const fila = m ? conversaciones.get(decodeURIComponent(m[1])) : null;
+    return res.end(JSON.stringify(fila ? [fila] : []));
+  }
   res.end(JSON.stringify(DATOS[tabla] ?? []));
 });
 
@@ -112,6 +125,7 @@ async function main() {
       SUPABASE_URL: `http://127.0.0.1:${PUERTO_FAKE}`,
       SUPABASE_SERVICE_KEY: "fake",
       COTIZADOR_TOKEN: TOKEN,
+      WHATSAPP_TOKEN: TOKEN,
       PORT: String(PUERTO_APP) },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -170,9 +184,149 @@ async function main() {
     for (const a of relevantes) console.log(`    aviso: ${a}`);
   }
 
+  // -------------------------------------------------------------------
+  // Camino de voz (Aircall)
+  //
+  // Se prueba igual que lo va a llamar el agente: secreto en la
+  // cabecera, parámetros como texto, y la fecha dicha en español.
+  // -------------------------------------------------------------------
+  console.log("\n" + "=".repeat(78));
+  console.log("CAMINO DE VOZ · como lo llama el AI Voice Agent de Aircall");
+  console.log("=".repeat(78));
+
+  const voz = async (cuerpo, cabeceras = {}) => {
+    const r = await fetch(`http://127.0.0.1:${PUERTO_APP}/voz/cotizar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 Authorization: `Bearer ${TOKEN}`, ...cabeceras },
+      body: JSON.stringify(cuerpo),
+    });
+    return { estado: r.status, cuerpo: await r.json() };
+  };
+
+  const ping = await fetch(`http://127.0.0.1:${PUERTO_APP}/voz/ping`,
+    { headers: { Authorization: `Bearer ${TOKEN}` } });
+  console.log(`\n  Test Connection  →  HTTP ${ping.status}  ${JSON.stringify(await ping.json())}`);
+
+  const malo = await voz({ personas: "80" }, { Authorization: "Bearer equivocado" });
+  console.log(`  Token equivocado →  HTTP ${malo.estado}  (debe ser 401)`);
+
+  const hablado = await voz({
+    fecha_inicio: "16 de marzo de 2027",
+    personas: "80", dias: "2", habitaciones: "30", noches: "2",
+    espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-ESTANDAR",
+  });
+  console.log(`\n  Cotización por voz →  HTTP ${hablado.estado}`);
+  for (const [k, v] of Object.entries(hablado.cuerpo)) {
+    if (k === "folio_deletreado") continue;
+    console.log(`    ${k.padEnd(12)} ${v}`);
+  }
+
+  // Lo que de verdad llega por teléfono: nadie dice "SALON-CENTRO" ni
+  // "PAQ-EJECUTIVO" hablando.
+  const HABLADAS = [
+    ["en palabras", { espacio: "Centro Avándaro", paquete_ayb: "paquete ejecutivo",
+                      tipo_habitacion: "estándar" }],
+    ["a medias",    { paquete_ayb: "ejecutivo" }],
+    ["sin comida",  { espacio: "Centro Avándaro", paquete_ayb: "sin alimentos" }],
+    ["inventado",   { espacio: "Centro Avándaro", paquete_ayb: "paquete vegano premium" }],
+  ];
+  for (const [etiqueta, extra] of HABLADAS) {
+    const r = await voz({ fecha_inicio: "16 de marzo de 2027", personas: "80",
+                          dias: "2", habitaciones: "30", noches: "2", ...extra });
+    console.log(`\n  Catálogo ${etiqueta} →  ok=${r.cuerpo.ok}  ${r.cuerpo.espacio ?? ""}`);
+    console.log(`    ${r.cuerpo.total || r.cuerpo.error}`);
+    if (r.cuerpo.nota) console.log(`    nota: ${r.cuerpo.nota}`);
+  }
+
+  const incompleto = await voz({ fecha_inicio: "16 de marzo de 2027" });
+  console.log(`\n  Sin número de personas →  HTTP ${incompleto.estado} (debe ser 200 para que el agente lo pueda decir)`);
+  console.log(`    ok     ${incompleto.cuerpo.ok}`);
+  console.log(`    error  ${incompleto.cuerpo.error}`);
+
+  // -------------------------------------------------------------------
+  // Camino de WhatsApp
+  //
+  // Aquí lo que se prueba es la CONVERSACIÓN, no el motor: que recuerde
+  // lo dicho, que entienda un número suelto solo cuando viene
+  // contestando algo, y que no cotice antes de tener lo mínimo.
+  // -------------------------------------------------------------------
+  console.log("\n" + "=".repeat(78));
+  console.log("CAMINO DE WHATSAPP · conversación completa");
+  console.log("=".repeat(78));
+
+  const wa = async (texto, extra = {}) => {
+    const r = await fetch(`http://127.0.0.1:${PUERTO_APP}/whatsapp/simular/${TOKEN}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ de: "5215512345678", texto, ...extra }),
+    });
+    return r.json();
+  };
+
+  const GUION = [
+    ["Hola, buenas tardes", { reiniciar: true }],
+    ["Sería el 16 de marzo"],
+    ["somos 80"],                                  // número suelto: solo cuenta porque se preguntó
+    ["dos días, en el Centro Avándaro"],           // dos datos en un mensaje
+    ["el paquete ejecutivo"],                      // catálogo por alias
+    ["sí, 30 habitaciones por 2 noches"],
+  ];
+
+  let ultimo = null;
+  for (const [texto, extra] of GUION) {
+    const r = await wa(texto, extra || {});
+    ultimo = r;
+    console.log(`\n  ►  ${texto}`);
+    for (const m of r.mensajes) {
+      console.log("     " + m.split("\n").join("\n     "));
+    }
+  }
+
+  const esperado = 876428;
+  const bit = bitacora.filter((b) => b.origen === "whatsapp").pop();
+  console.log(`\n  Resultado: folio ${ultimo.folio || "(ninguno)"} · ` +
+    `total ${bit ? bit.total : "—"} · esperado ${esperado} · ` +
+    (bit && bit.total === esperado ? "COINCIDE con los otros canales" : "NO COINCIDE"));
+  console.log(`  Memoria del hilo: ${JSON.stringify(ultimo.datos)}`);
+
+  // Rechazo, empezando de cero
+  console.log("\n  --- hilo nuevo, caso que no cabe ---");
+  for (const [t, e] of [["otra cotización", {}], ["500 personas en el kiosko el 16 de marzo", {}]]) {
+    const r = await wa(t, e);
+    console.log(`\n  ►  ${t}`);
+    for (const m of r.mensajes) console.log("     " + m);
+  }
+
+  // -------------------------------------------------------------------
+  // Volcado para el demo
+  //
+  // VOLCADO=ruta.json node prueba.js
+  //
+  // Escribe las respuestas REALES del motor, por los dos caminos, para
+  // que el demo que se le enseña al cliente no sean capturas dibujadas
+  // a mano sino lo que el sistema de verdad contesta.
+  // -------------------------------------------------------------------
+  if (process.env.VOLCADO) {
+    const { writeFile } = await import("node:fs/promises");
+    const captura = [];
+    for (const [titulo, cuerpo] of ESCENARIOS) {
+      captura.push({
+        titulo,
+        peticion: cuerpo,
+        completa: await pedir(cuerpo),
+        voz: (await voz(cuerpo)).cuerpo,
+      });
+    }
+    await writeFile(process.env.VOLCADO, JSON.stringify(captura, null, 2));
+    console.log(`\nVolcado: ${captura.length} escenarios en ${process.env.VOLCADO}`);
+  }
+
   console.log("\n" + "=".repeat(78));
   console.log(`Bitácora: ${bitacora.length} cotizaciones registradas ` +
               `(${bitacora.filter((b) => !b.error).length} exitosas, ${bitacora.filter((b) => b.error).length} con error)`);
+  console.log(`  por origen: ` + Object.entries(
+    bitacora.reduce((a, b) => ({ ...a, [b.origen]: (a[b.origen] || 0) + 1 }), {}))
+    .map(([k, v]) => `${k}=${v}`).join(", "));
 
   app.kill();
   fake.close();
