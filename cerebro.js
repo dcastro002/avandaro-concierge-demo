@@ -33,6 +33,22 @@ export function disponible() {
   return Boolean(process.env.GEMINI_API_KEY);
 }
 
+// Recorta el historial sin partirlo a la mitad.
+//
+// Un turno del modelo que pide una herramienta y la respuesta de esa
+// herramienta son un par: si el corte cae entre los dos, Gemini recibe
+// una respuesta de función que no corresponde a ninguna llamada y
+// contesta 400. Por eso se recorta y luego se avanza hasta el primer
+// mensaje de la persona.
+export function recortar(contents = [], maximo = 16) {
+  const trozo = contents.slice(-maximo);
+  const esTurnoDePersona = (c) =>
+    c?.role === "user" && (c.parts || []).some((p) => typeof p.text === "string");
+  let i = 0;
+  while (i < trozo.length && !esTurnoDePersona(trozo[i])) i++;
+  return i < trozo.length ? trozo.slice(i) : [];
+}
+
 // Los nombres de modelo de Google cambian seguido. En vez de adivinar,
 // se pregunta. Sirve para el diagnóstico cuando algo da 404.
 export async function listarModelos(llave = process.env.GEMINI_API_KEY) {
@@ -162,16 +178,21 @@ export async function conversar({
     const llamadas = ps.filter((p) => p.functionCall).map((p) => p.functionCall);
     const textos = ps.filter((p) => p.text).map((p) => p.text.trim()).filter(Boolean);
 
+    // El turno del modelo se devuelve TAL CUAL vino.
+    //
+    // Gemini 3 exige que las partes con functionCall conserven su
+    // thought_signature cuando se le regresa el historial. Si uno las
+    // reconstruye, aunque sea con los mismos datos visibles, esa firma
+    // se pierde y la siguiente vuelta falla con un 400.
+    const contenido = respuesta?.candidates?.[0]?.content;
+
     if (!llamadas.length) {
-      if (textos.length) {
-        mensajes.push(...textos);
-        contents.push({ role: "model", parts: textos.map((t) => ({ text: t })) });
-      }
+      if (textos.length) mensajes.push(...textos);
+      if (contenido) contents.push(contenido);
       break;
     }
 
-    // El modelo pidió herramientas. Se registran y se ejecutan.
-    contents.push({ role: "model", parts: llamadas.map((c) => ({ functionCall: c })) });
+    contents.push(contenido ?? { role: "model", parts: ps.filter((p) => p.functionCall) });
 
     const respuestasHerramienta = [];
     for (const c of llamadas) {

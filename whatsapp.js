@@ -618,14 +618,14 @@ export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos 
   }
 
   const salida = await cerebro.conversarSeguro({
-    historial: st.historial.slice(-16),
+    historial: cerebro.recortar(st.historial, 16),
     mensaje: texto,
     sistema: SISTEMA + `\n\nHoy es ${new Date().toISOString().slice(0, 10)}.`,
     herramientas: HERRAMIENTAS,
     ejecutar: hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }),
   });
 
-  st.historial = salida.historial.slice(-16);
+  st.historial = cerebro.recortar(salida.historial, 16);
   st.actualizado = Date.now();
 
   // Primero las cifras que calculó el motor, después el comentario del
@@ -655,7 +655,7 @@ async function persistir(cliente, st) {
       wa_id: st.wa_id,
       // El historial del modelo viaja dentro de datos para no pedir una
       // columna más y una migración a media noche.
-      datos: st.historial?.length ? { ...st.datos, _historial: st.historial.slice(-16) } : st.datos,
+      datos: st.historial?.length ? { ...st.datos, _historial: cerebro.recortar(st.historial, 16) } : st.datos,
       esperando: st.esperando,
       preguntado: st.preguntado,
       actualizado: new Date(st.actualizado).toISOString(),
