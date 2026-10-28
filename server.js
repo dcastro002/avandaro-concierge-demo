@@ -73,6 +73,9 @@ if (COTIZADOR_TOKEN) {
 if (WHATSAPP_TOKEN && COTIZADOR_TOKEN) {
   montados.push(...whatsapp.montar(app, {
     cliente: modulos.cotizador,
+    // La base de conocimiento del hotel vive en otro esquema. Con ella,
+    // el agente contesta horarios y servicios además de cotizar.
+    kb: crearCliente(SUPABASE_URL, SUPABASE_SERVICE_KEY, "kb"),
     token: WHATSAPP_TOKEN,
     cotizar: cotizador.cotizar,
     catalogos: cotizador.catalogos,

@@ -51,6 +51,28 @@ export function crearCliente(urlBase, llave, esquema) {
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   }
 
+  // PostgREST publica un OpenAPI en la raíz de cada esquema. Se usa para
+  // descubrir qué vistas existen y qué columnas de texto tienen, en vez
+  // de escribir nombres a mano que después cambian cuando alguien
+  // reorganiza la base.
+  async function describir() {
+    const r = await fetch(`${REST}/`, { headers: cabeceras() });
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+    const spec = await r.json();
+    const defs = spec.definitions || spec.components?.schemas || {};
+    const salida = {};
+    for (const [tabla, def] of Object.entries(defs)) {
+      const props = def.properties || {};
+      salida[tabla] = {
+        columnas: Object.keys(props),
+        texto: Object.entries(props)
+          .filter(([, p]) => p.type === "string" && !/date|time/i.test(p.format || ""))
+          .map(([c]) => c),
+      };
+    }
+    return salida;
+  }
+
   // Comprueba que el esquema esté expuesto y que la llave sirva, antes
   // de que lo descubra HubSpot en medio de una demo.
   async function verificar(tabla) {
@@ -62,5 +84,5 @@ export function crearCliente(urlBase, llave, esquema) {
     }
   }
 
-  return { esquema, consultar, insertar, guardar, verificar };
+  return { esquema, consultar, insertar, guardar, describir, verificar };
 }

@@ -31,6 +31,7 @@
 import { randomUUID } from "node:crypto";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { aFechaISO, normaliza, fechaEnLetras, AVISO_FIJO } from "./voz.js";
+import * as cerebro from "./cerebro.js";
 
 const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
   "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
@@ -263,7 +264,7 @@ function estadoNuevo(wa_id) {
   return { wa_id, datos: {}, esperando: null, preguntado: [], actualizado: Date.now() };
 }
 
-export async function responder(entrada, { cliente, cotizar, catalogos, hoy }) {
+export async function responderConReglas(entrada, { cliente, cotizar, catalogos, hoy }) {
   const { wa_id, texto, nombre } = entrada;
   let st = ESTADOS.get(wa_id);
 
@@ -406,12 +407,251 @@ export async function responder(entrada, { cliente, cotizar, catalogos, hoy }) {
   return { mensajes, estado: st, cotizacion: salida };
 }
 
+// =====================================================================
+// Camino con modelo de lenguaje
+//
+// Misma conversación, pero entendida en vez de parseada. Lo que NO
+// cambia es de dónde salen las cifras.
+// =====================================================================
+
+const SISTEMA = `Atiendes el WhatsApp de Grupos y Eventos de Hotel Avándaro, en Valle de Bravo.
+
+Hablas español de México, de usted, cordial y directo. Mensajes cortos: esto es WhatsApp, no un correo. Una idea por mensaje.
+
+Para cotizar necesitas al menos la fecha de inicio y cuántas personas. Pregunta una cosa a la vez, nunca tres juntas. Si no te han dicho nada de alimentos, pregúntalo antes de cotizar: sin paquete el precio sale muy por debajo y deja al cliente con una expectativa equivocada.
+
+Nunca pidas claves ni códigos de catálogo. La persona dice "una comida completa" o "el salón grande", y tú se lo pasas así a la herramienta, que sabe traducirlo.
+
+REGLA QUE NO SE ROMPE: tú no dices precios. Nunca. Ni aproximados, ni rangos, ni "alrededor de", ni repitiendo una cifra que el cliente mencionó. Los precios los entrega la herramienta cotizar_evento en un mensaje aparte que el cliente recibe directamente de nosotros. Cuando la herramienta te confirme que ya se envió, tú solo comentas brevemente o preguntas lo que sigue, sin repetir ninguna cantidad. Si alguien insiste en que le adelantes un número, explica que lo calculas al momento y pide los datos que falten.
+
+Para preguntas del hotel (horarios, servicios, lugares, actividades) usa consultar_hotel. Si no encuentras algo, dilo con honestidad: que lo confirmas con el equipo. Nunca inventes un horario, un servicio ni una capacidad.
+
+Si preguntan algo que no es de eventos ni del hotel, redirige con amabilidad.`;
+
+const HERRAMIENTAS = [
+  {
+    name: "cotizar_evento",
+    description:
+      "Calcula el precio del evento y se lo envía al cliente en un mensaje aparte. " +
+      "Úsala en cuanto tengas fecha y número de personas. No te devuelve cifras a ti: " +
+      "la cotización le llega al cliente directamente.",
+    parameters: {
+      type: "object",
+      properties: {
+        fecha_inicio: { type: "string", description: "Fecha de inicio en AAAA-MM-DD. Si no dijeron el año, usa el próximo que corresponda." },
+        personas: { type: "integer", description: "Cuánta gente asiste." },
+        dias: { type: "integer", description: "Días que dura el evento. Si no lo dijeron, 1." },
+        habitaciones: { type: "integer", description: "Habitaciones necesarias. 0 si no quieren hospedaje." },
+        noches: { type: "integer", description: "Noches de hospedaje." },
+        espacio: { type: "string", description: "Salón o espacio, con el nombre que usó el cliente. Omítelo si no lo mencionó: el sistema sugiere uno." },
+        paquete_ayb: { type: "string", description: "Paquete de alimentos como lo dijo el cliente. Omítelo solo si dijo que no quiere alimentos." },
+        tipo_habitacion: { type: "string", description: "Tipo de habitación, si lo mencionó." },
+      },
+      required: ["fecha_inicio", "personas"],
+    },
+  },
+  {
+    name: "ver_catalogo",
+    description: "Lista los espacios con sus capacidades, los paquetes de alimentos y los tipos de habitación. Úsala cuando pregunten qué opciones hay o si un grupo cabe en algún lugar.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "consultar_hotel",
+    description: "Busca información del hotel: servicios, horarios, lugares, actividades, experiencias. Úsala para cualquier pregunta que no sea de precios.",
+    parameters: {
+      type: "object",
+      properties: { busqueda: { type: "string", description: "Qué buscar, en pocas palabras. Por ejemplo: alberca, spa, horario del restaurante." } },
+      required: ["busqueda"],
+    },
+  },
+];
+
+// El mapa del esquema kb se descubre una vez y se guarda. Así no hay
+// nombres de vistas escritos a mano que se rompan cuando alguien
+// reorganice la base de conocimiento.
+let kbMapa = null;
+
+async function buscarEnHotel(kb, busqueda) {
+  if (!kb) return { ok: false, error: "La información del hotel no está conectada todavía." };
+  if (!kbMapa) kbMapa = await kb.describir();
+
+  const limpio = String(busqueda || "").replace(/[(),*]/g, " ").trim();
+  if (!limpio) return { ok: false, error: "Falta qué buscar." };
+  const t = encodeURIComponent(limpio);
+
+  const hallazgos = [];
+  for (const [tabla, info] of Object.entries(kbMapa)) {
+    if (!info.texto.length || hallazgos.length >= 6) continue;
+    const o = info.texto.map((c) => `${c}.ilike.*${t}*`).join(",");
+    try {
+      const filas = await kb.consultar(`${tabla}?select=*&or=(${o})&limit=3`);
+      for (const f of filas) hallazgos.push({ fuente: tabla, ...f });
+    } catch { /* una vista que no admita el filtro no debe tumbar la búsqueda */ }
+  }
+
+  if (!hallazgos.length) {
+    return { ok: true, encontrado: false,
+             instruccion: "No hay nada sobre eso en la base. Dile al cliente que lo confirmas con el equipo. No lo inventes." };
+  }
+  return { ok: true, encontrado: true, resultados: hallazgos.slice(0, 6) };
+}
+
+function hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }) {
+  return async (herramienta, args) => {
+    if (herramienta === "ver_catalogo") {
+      const c = await catalogos();
+      return { resultado: {
+        ok: true,
+        espacios: c.espacios.map((e) => ({ nombre: e.nombre, tipo: e.tipo, interior: e.interior,
+          cabe_banquete: e.cap_banquete, cabe_coctel: e.cap_coctel, cabe_auditorio: e.cap_auditorio })),
+        paquetes: c.paquetes.map((p) => ({ nombre: p.nombre, incluye: p.incluye })),
+        habitaciones: [...new Set(c.hospedaje.map((h) => h.nombre))],
+        instruccion: "No menciones precios de este catálogo aunque los veas.",
+      } };
+    }
+
+    if (herramienta === "consultar_hotel") {
+      return { resultado: await buscarEnHotel(kb, args.busqueda) };
+    }
+
+    if (herramienta !== "cotizar_evento") {
+      return { resultado: { ok: false, error: "Herramienta desconocida." } };
+    }
+
+    const peticion = {
+      origen: "whatsapp",
+      fecha_inicio: aFechaISO(args.fecha_inicio),
+      personas: args.personas,
+      dias: args.dias ?? 1,
+      habitaciones: args.habitaciones ?? 0,
+      noches: args.noches ?? (args.habitaciones ? 1 : 0),
+      espacio: args.espacio || undefined,
+      paquete_ayb: args.paquete_ayb || undefined,
+      tipo_habitacion: args.tipo_habitacion || undefined,
+    };
+    Object.assign(st.datos, {
+      fecha_inicio: peticion.fecha_inicio, personas: peticion.personas,
+      dias: peticion.dias, habitaciones: peticion.habitaciones, noches: peticion.noches,
+    });
+
+    let salida;
+    try {
+      salida = await cotizar(peticion);
+    } catch (e) {
+      console.error("Error al cotizar:", e);
+      salida = { ok: false, errores: [`Error interno: ${e.message}`] };
+    }
+
+    if (cliente) {
+      try {
+        await cliente.insertar("cotizaciones", {
+          folio: salida.folio ?? `ERR-${randomUUID().slice(0, 8)}`,
+          origen: "whatsapp",
+          hubspot_deal: null,
+          peticion: { ...peticion, wa_id, nombre: nombre ?? null, via: "gemini" },
+          respuesta: salida,
+          total: salida.importes?.total ?? null,
+          error: salida.ok ? null : (salida.errores || []).join(" · "),
+        });
+      } catch (e) {
+        console.error("No se pudo escribir la bitácora:", e.message);
+      }
+    }
+
+    if (!salida.ok) {
+      return { resultado: { ok: false, entregada: false,
+        motivo: (salida.errores || ["No se pudo cotizar."]).join(" "),
+        instruccion: "Explícaselo al cliente con tus palabras y pide o corrige el dato que haga falta. No des ninguna cifra." } };
+    }
+
+    // AQUÍ ESTÁ EL CANDADO: el modelo recibe un acuse sin un solo
+    // número. Las cifras van en mensajesDirectos, que salen tal como
+    // las calculó el motor, sin pasar por el modelo.
+    return {
+      mensajesDirectos: [textoCotizacion(salida), ...avisosChat(salida), AVISO_FIJO],
+      resultado: {
+        ok: true,
+        entregada: true,
+        folio: salida.folio,
+        espacio: salida.espacio.nombre,
+        instruccion: "La cotización completa YA se le envió al cliente en mensajes aparte. " +
+          "NO repitas ni menciones ninguna cantidad. Comenta brevemente y pregunta si quiere " +
+          "ajustar algo o si tiene dudas.",
+      },
+    };
+  };
+}
+
+async function cargarEstado(wa_id, cliente) {
+  let st = ESTADOS.get(wa_id);
+  if (!st && cliente) {
+    try {
+      const filas = await cliente.consultar(
+        `conversaciones?select=*&wa_id=eq.${encodeURIComponent(wa_id)}&limit=1`);
+      if (filas[0]) {
+        const { _historial, ...datos } = filas[0].datos || {};
+        st = { wa_id, datos, historial: _historial || [],
+               esperando: filas[0].esperando, preguntado: filas[0].preguntado || [],
+               actualizado: new Date(filas[0].actualizado).getTime() };
+      }
+    } catch (e) {
+      console.error("No se pudo leer la conversación:", e.message);
+    }
+  }
+  if (!st || Date.now() - st.actualizado > VIVE_MS) st = estadoNuevo(wa_id);
+  if (!st.historial) st.historial = [];
+  return st;
+}
+
+export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos }) {
+  const { wa_id, texto, nombre } = entrada;
+  const st = await cargarEstado(wa_id, cliente);
+
+  if (REINICIO.test(normaliza(texto))) {
+    const nuevo = estadoNuevo(wa_id);
+    nuevo.historial = [];
+    return { mensajes: ["Listo, empecemos de nuevo. ¿Para qué fecha sería el evento?"], estado: nuevo };
+  }
+
+  const salida = await cerebro.conversarSeguro({
+    historial: st.historial.slice(-16),
+    mensaje: texto,
+    sistema: SISTEMA + `\n\nHoy es ${new Date().toISOString().slice(0, 10)}.`,
+    herramientas: HERRAMIENTAS,
+    ejecutar: hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }),
+  });
+
+  st.historial = salida.historial.slice(-16);
+  st.actualizado = Date.now();
+
+  // Primero las cifras que calculó el motor, después el comentario del
+  // modelo. Al revés, el cliente lee "ahí le va" antes de tener nada.
+  const mensajes = [...salida.directos, ...salida.mensajes];
+  if (!mensajes.length) mensajes.push("Disculpe, no entendí. ¿Me repite qué necesita?");
+
+  return { mensajes, estado: st, via: "gemini", herramientas: salida.usadas };
+}
+
+// Despacho. Si no hay llave, o si el modelo falla, la capa de reglas
+// contesta igual. El demo no se cae porque Google tenga un mal día.
+export async function responder(entrada, deps) {
+  if (!cerebro.disponible()) return responderConReglas(entrada, deps);
+  try {
+    return await responderConIA(entrada, deps);
+  } catch (e) {
+    console.error("El cerebro falló, se contesta con reglas:", e.message);
+    return responderConReglas(entrada, deps);
+  }
+}
+
 async function persistir(cliente, st) {
   if (!cliente) return;
   try {
     await cliente.guardar("conversaciones", {
       wa_id: st.wa_id,
-      datos: st.datos,
+      // El historial del modelo viaja dentro de datos para no pedir una
+      // columna más y una migración a media noche.
+      datos: st.historial?.length ? { ...st.datos, _historial: st.historial.slice(-16) } : st.datos,
       esperando: st.esperando,
       preguntado: st.preguntado,
       actualizado: new Date(st.actualizado).toISOString(),
@@ -454,7 +694,21 @@ function firmaValida(req, appSecret) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function montar(app, { cliente, token, cotizar, catalogos, config = {} }) {
+export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {} }) {
+  const deps = { cliente, kb, cotizar, catalogos };
+
+  // Diagnóstico del cerebro. Los nombres de modelo de Google cambian
+  // seguido; esto dice cuáles acepta la llave sin tener que adivinar.
+  app.get("/whatsapp/modelos/:token", async (req, res) => {
+    if (req.params.token !== token) return res.status(401).json({ error: "token inválido" });
+    if (!cerebro.disponible()) return res.json({ ok: false, motivo: "No hay GEMINI_API_KEY; se contesta con reglas." });
+    try {
+      res.json({ ok: true, usando: cerebro.MODELO_POR_DEFECTO, disponibles: await cerebro.listarModelos() });
+    } catch (e) {
+      res.status(502).json({ ok: false, error: e.message });
+    }
+  });
+
   // Alta del webhook en el panel de Meta.
   app.get("/whatsapp/webhook", (req, res) => {
     if (req.query["hub.mode"] === "subscribe" &&
@@ -485,8 +739,7 @@ export function montar(app, { cliente, token, cotizar, catalogos, config = {} })
             }
             const nombre = v.contacts?.[0]?.profile?.name;
             const r = await responder(
-              { wa_id: msg.from, texto: msg.text.body, nombre },
-              { cliente, cotizar, catalogos });
+              { wa_id: msg.from, texto: msg.text.body, nombre }, deps);
             await persistir(cliente, r.estado);
             for (const m of r.mensajes) await enviar(config, msg.from, m);
           }
@@ -509,15 +762,16 @@ export function montar(app, { cliente, token, cotizar, catalogos, config = {} })
     const { de = "simulador", texto = "", reiniciar } = req.body ?? {};
     if (reiniciar) ESTADOS.delete(de);
     try {
-      const r = await responder({ wa_id: de, texto, nombre: "Simulador" },
-        { cliente, cotizar, catalogos });
+      const r = await responder({ wa_id: de, texto, nombre: "Simulador" }, deps);
       ESTADOS.set(de, r.estado);
       await persistir(cliente, r.estado);
       res.json({
         ok: true,
+        via: r.via ?? "reglas",
+        herramientas: r.herramientas ?? [],
         mensajes: r.mensajes,
         datos: r.estado.datos,
-        esperando: r.estado.esperando,
+        esperando: r.estado.esperando ?? null,
         folio: r.cotizacion?.folio ?? null,
       });
     } catch (e) {
@@ -530,5 +784,6 @@ export function montar(app, { cliente, token, cotizar, catalogos, config = {} })
     "GET  /whatsapp/webhook  (verificación de Meta)",
     "POST /whatsapp/webhook  (firmado)",
     "POST /whatsapp/simular/:token",
+    "GET  /whatsapp/modelos/:token",
   ];
 }
