@@ -471,6 +471,30 @@ const HERRAMIENTAS = [
 // reorganice la base de conocimiento.
 let kbMapa = null;
 
+// Lo que nunca se consulta para contestarle a alguien de fuera.
+// incidencias es nuestra bitácora de huecos en la base: sirve para
+// cobrarle pendientes a Avándaro, no para enseñársela a un prospecto.
+const INTERNAS = /^(incidencias|servicio_horarios|v_incidencias)$/;
+
+// Columnas que no salen del hotel. El teléfono de un área y el nombre
+// de quien la atiende son datos de operación interna; que el agente los
+// tenga a la mano es una fuga esperando a pasar.
+const COLUMNAS_INTERNAS = new Set([
+  "id", "responsable", "whatsapp", "extension", "contacto_reserva",
+  "notas_concierge", "estatus_dato", "actualizado",
+  "origen_pestana", "origen_fila", "dias_sin_confirmar",
+]);
+
+function limpiarFila(fila) {
+  const salida = {};
+  for (const [k, v] of Object.entries(fila)) {
+    if (COLUMNAS_INTERNAS.has(k)) continue;
+    if (v === null || v === "") continue;
+    salida[k] = v;
+  }
+  return salida;
+}
+
 async function buscarEnHotel(kb, busqueda) {
   if (!kb) return { ok: false, error: "La información del hotel no está conectada todavía." };
   if (!kbMapa) kbMapa = await kb.describir();
@@ -479,13 +503,17 @@ async function buscarEnHotel(kb, busqueda) {
   if (!limpio) return { ok: false, error: "Falta qué buscar." };
   const t = encodeURIComponent(limpio);
 
-  // Las vistas v_ van primero: son las curadas, las que ya excluyen el
-  // dato sin confirmar. Ordenar importa porque solo se revisan unas
-  // cuantas, y por orden alfabético las v_ quedaban al final, o sea
-  // fuera del corte. Cada vista es un viaje a Supabase mientras la
-  // persona espera en su chat.
-  const porRevisar = Object.entries(kbMapa)
-    .sort((a, b) => (b[0].startsWith("v_") ? 1 : 0) - (a[0].startsWith("v_") ? 1 : 0))
+  // SOLO las vistas v_, cuando existen.
+  //
+  // Las vistas son el contrato: filtran lo que está marcado como
+  // incompleto y arman los horarios ya validados. Las tablas crudas
+  // traen además el dato sin confirmar, que es justo lo que no se le
+  // dice a un prospecto. Si se consultan las dos, el filtro no sirve
+  // de nada y además se duplica todo.
+  const todas = Object.entries(kbMapa);
+  const hayVistas = todas.some(([t]) => t.startsWith("v_"));
+  const porRevisar = (hayVistas ? todas.filter(([t]) => t.startsWith("v_")) : todas)
+    .filter(([t]) => !INTERNAS.test(t))
     .slice(0, 10);
 
   const hallazgos = [];
@@ -495,7 +523,7 @@ async function buscarEnHotel(kb, busqueda) {
     const o = info.texto.map((c) => `${c}.ilike.*${t}*`).join(",");
     try {
       const filas = await kb.consultar(`${tabla}?select=*&or=(${o})&limit=3`);
-      for (const f of filas) hallazgos.push({ fuente: tabla, ...f });
+      for (const f of filas) hallazgos.push(limpiarFila(f));
     } catch { /* una vista que no admita el filtro no debe tumbar la búsqueda */ }
   }
 
@@ -679,7 +707,11 @@ async function enviar(config, para, texto) {
     console.log(`[simulado → ${para}] ${texto.slice(0, 80)}`);
     return;
   }
-  const r = await fetch(`https://graph.facebook.com/v21.0/${config.phoneNumberId}/messages`, {
+  // La versión va por variable: Meta retira versiones de la Graph API
+  // cada dos años, y dejarla fija en el código significa que un día
+  // deja de enviar sin que nadie haya tocado nada.
+  const version = config.graphVersion || process.env.WA_GRAPH_VERSION || "v25.0";
+  const r = await fetch(`https://graph.facebook.com/${version}/${config.phoneNumberId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${config.graphToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
