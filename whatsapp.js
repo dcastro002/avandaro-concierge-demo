@@ -1,6 +1,5 @@
 // =====================================================================
 // Cotizador por WhatsApp · Grupo Avándaro × Freelan
-
 //
 // LA DIFERENCIA CON LA VOZ
 //
@@ -703,6 +702,22 @@ async function persistir(cliente, st) {
 // ---------------------------------------------------------------------
 // Salida hacia Meta
 // ---------------------------------------------------------------------
+// El uno de más de México.
+//
+// Los móviles mexicanos arrastran una herencia vieja de WhatsApp: el
+// webhook entrega el número como 521 + diez dígitos, mientras que la
+// lista de destinatarios y el resto de la API lo tienen como 52 + diez.
+// Contestarle al que nos llegó da "Recipient phone number not in
+// allowed list" aunque el número esté perfectamente dado de alta.
+//
+// Devuelve las dos formas, la preferida primero, para poder reintentar.
+export function variantesDestino(numero) {
+  const n = String(numero || "").replace(/\D/g, "");
+  if (/^521\d{10}$/.test(n)) return [n.replace(/^521/, "52"), n];
+  if (/^52\d{10}$/.test(n)) return [n, n.replace(/^52/, "521")];
+  return [n];
+}
+
 async function enviar(config, para, texto) {
   if (!config.phoneNumberId || !config.graphToken) {
     console.log(`[simulado → ${para}] ${texto.slice(0, 80)}`);
@@ -712,17 +727,37 @@ async function enviar(config, para, texto) {
   // cada dos años, y dejarla fija en el código significa que un día
   // deja de enviar sin que nadie haya tocado nada.
   const version = config.graphVersion || process.env.WA_GRAPH_VERSION || "v25.0";
-  const r = await fetch(`https://graph.facebook.com/${version}/${config.phoneNumberId}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.graphToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to: para,
-      type: "text",
-      text: { preview_url: false, body: texto },
-    }),
-  });
-  if (!r.ok) console.error("WhatsApp rechazó el envío:", r.status, await r.text());
+  const url = `https://graph.facebook.com/${version}/${config.phoneNumberId}/messages`;
+
+  // Se intenta la forma preferida y, si Meta dice que el destinatario
+  // no está en la lista, la otra. Así no dependemos de adivinar cuál
+  // de los dos formatos quedó registrado.
+  const intentos = variantesDestino(para);
+  for (let i = 0; i < intentos.length; i++) {
+    const destino = intentos[i];
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.graphToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: destino,
+        type: "text",
+        text: { preview_url: false, body: texto },
+      }),
+    });
+    if (r.ok) {
+      if (i > 0) console.log(`Enviado a ${destino} tras reintento de formato.`);
+      return;
+    }
+    const cuerpo = await r.text();
+    const esListaBlanca = /131030/.test(cuerpo);
+    if (esListaBlanca && i < intentos.length - 1) {
+      console.log(`${destino} no está en la lista; se reintenta con otro formato.`);
+      continue;
+    }
+    console.error("WhatsApp rechazó el envío:", r.status, cuerpo);
+    return;
+  }
 }
 
 // Meta firma cada entrega. Sin esta comprobación, cualquiera que
