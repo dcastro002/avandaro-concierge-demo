@@ -44,10 +44,24 @@ export async function listarModelos(llave = process.env.GEMINI_API_KEY) {
     .map((m) => String(m.name).replace(/^models\//, ""));
 }
 
+// Sin tiempo límite, una llamada que no vuelve deja la conversación
+// colgada para siempre y el respaldo de reglas nunca entra, porque nada
+// lanza error. Mejor fallar rápido y contestar con reglas.
+const LIMITE_MS = Number(process.env.GEMINI_TIMEOUT_MS || 18000);
+
 async function generar(cuerpo, modelo, llave) {
-  const r = await fetch(
-    `${RAIZ}/models/${encodeURIComponent(modelo)}:generateContent?key=${encodeURIComponent(llave)}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cuerpo) });
+  let r;
+  try {
+    r = await fetch(
+      `${RAIZ}/models/${encodeURIComponent(modelo)}:generateContent?key=${encodeURIComponent(llave)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo), signal: AbortSignal.timeout(LIMITE_MS) });
+  } catch (e) {
+    const porTiempo = e.name === "TimeoutError" || e.name === "AbortError";
+    throw new Error(porTiempo
+      ? `Gemini no contestó en ${LIMITE_MS / 1000} s`
+      : `No se pudo llamar a Gemini: ${e.message}`);
+  }
   const texto = await r.text();
   if (!r.ok) {
     const e = new Error(`Gemini ${r.status}: ${texto.slice(0, 400)}`);
@@ -86,14 +100,22 @@ export async function conversar({
   ejecutar,
   modelo = MODELO_POR_DEFECTO,
   llave = process.env.GEMINI_API_KEY,
-  maxVueltas = 4,
+  maxVueltas = 3,
 } = {}) {
   const contents = [...historial, { role: "user", parts: [{ text: mensaje }] }];
   const mensajes = [];
   const directos = [];
   const usadas = [];
 
+  // Presupuesto total de la vuelta. Quien escribe por WhatsApp no
+  // espera cuarenta segundos; prefiere una respuesta de reglas.
+  const hastaCuando = Date.now() + LIMITE_MS * 2;
+
   for (let vuelta = 0; vuelta < maxVueltas; vuelta++) {
+    if (Date.now() > hastaCuando) {
+      console.log("Se agotó el presupuesto de tiempo del cerebro.");
+      break;
+    }
     const cuerpo = {
       contents,
       systemInstruction: { parts: [{ text: sistema }] },

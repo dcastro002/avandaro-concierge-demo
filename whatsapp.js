@@ -480,8 +480,12 @@ async function buscarEnHotel(kb, busqueda) {
   const t = encodeURIComponent(limpio);
 
   const hallazgos = [];
-  for (const [tabla, info] of Object.entries(kbMapa)) {
-    if (!info.texto.length || hallazgos.length >= 6) continue;
+  // Se revisan pocas vistas y se corta en cuanto hay con qué contestar.
+  // Cada vista es un viaje a Supabase, y esto corre dentro del tiempo
+  // que el cliente está esperando en su chat.
+  for (const [tabla, info] of Object.entries(kbMapa).slice(0, 8)) {
+    if (hallazgos.length >= 6) break;
+    if (!info.texto.length) continue;
     const o = info.texto.map((c) => `${c}.ilike.*${t}*`).join(",");
     try {
       const filas = await kb.consultar(`${tabla}?select=*&or=(${o})&limit=3`);

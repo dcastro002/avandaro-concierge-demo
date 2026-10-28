@@ -24,18 +24,23 @@ export function crearCliente(urlBase, llave, esquema) {
     [escritura ? "Content-Profile" : "Accept-Profile"]: esquema,
   });
 
+  // Todo lleva tiempo límite. Una consulta que no vuelve deja colgada
+  // la conversación de quien está esperando en su chat.
+  const LIMITE_MS = Number(process.env.SUPABASE_TIMEOUT_MS || 10000);
+  const conLimite = (extra = {}) => ({ ...extra, signal: AbortSignal.timeout(LIMITE_MS) });
+
   async function consultar(ruta) {
-    const r = await fetch(`${REST}/${ruta}`, { headers: cabeceras() });
+    const r = await fetch(`${REST}/${ruta}`, conLimite({ headers: cabeceras() }));
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   }
 
   async function insertar(tabla, fila) {
-    const r = await fetch(`${REST}/${tabla}`, {
+    const r = await fetch(`${REST}/${tabla}`, conLimite({
       method: "POST",
       headers: { ...cabeceras(true), Prefer: "return=minimal" },
       body: JSON.stringify(fila),
-    });
+    }));
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   }
 
@@ -43,11 +48,11 @@ export function crearCliente(urlBase, llave, esquema) {
   // que reescribe el estado de la conversación en cada mensaje.
   async function guardar(tabla, fila, conflicto) {
     const q = conflicto ? `?on_conflict=${encodeURIComponent(conflicto)}` : "";
-    const r = await fetch(`${REST}/${tabla}${q}`, {
+    const r = await fetch(`${REST}/${tabla}${q}`, conLimite({
       method: "POST",
       headers: { ...cabeceras(true), Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify(fila),
-    });
+    }));
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   }
 
@@ -56,7 +61,7 @@ export function crearCliente(urlBase, llave, esquema) {
   // de escribir nombres a mano que después cambian cuando alguien
   // reorganiza la base.
   async function describir() {
-    const r = await fetch(`${REST}/`, { headers: cabeceras() });
+    const r = await fetch(`${REST}/`, conLimite({ headers: cabeceras() }));
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
     const spec = await r.json();
     const defs = spec.definitions || spec.components?.schemas || {};
