@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 const DATOS = {
   parametros: [
     { clave: "iva", valor: 0.16, confirmado: false },
-    { clave: "ish", valor: 0.03, confirmado: false },
+    { clave: "ish", valor: 0.04, confirmado: false },
     { clave: "servicio", valor: 0.15, confirmado: false },
     { clave: "vigencia_dias", valor: 15, confirmado: false },
     { clave: "anticipo_pct", valor: 0.5, confirmado: false },
@@ -67,11 +67,12 @@ const DATOS = {
     { clave: "PAQ-TODO", nombre: "Todo incluido", precio_persona: 3600, incluye: "Alimentos y barra libre", activo: true },
   ],
   tarifas_hospedaje: [
-    ["HAB-ESTANDAR","Habitación estándar","alta",5400,2],["HAB-ESTANDAR","Habitación estándar","media",4300,2],["HAB-ESTANDAR","Habitación estándar","baja",3400,2],
-    ["HAB-JUNIOR","Junior suite","alta",7900,3],["HAB-JUNIOR","Junior suite","media",6300,3],["HAB-JUNIOR","Junior suite","baja",4900,3],
-    ["HAB-SUITE","Suite","alta",11500,4],["HAB-SUITE","Suite","media",9200,4],["HAB-SUITE","Suite","baja",7200,4],
-  ].map(([tipo_habitacion, nombre, temporada, tarifa_noche, ocupacion_max]) =>
-    ({ tipo_habitacion, nombre, temporada, tarifa_noche, ocupacion_max })),
+    ["HAB-INDIVIDUAL","Habitación individual","semana",3900,1,30],["HAB-INDIVIDUAL","Habitación individual","fin",4600,1,30],
+    ["HAB-DOBLE","Habitación doble","semana",4190,2,44],["HAB-DOBLE","Habitación doble","fin",5600,2,44],
+    ["HAB-SUITE","Suite Premium","semana",4244,2,6],["HAB-SUITE","Suite Premium","fin",5950,2,6],
+    ["HAB-PRESIDENCIAL","Presidencial","semana",6840,2,1],["HAB-PRESIDENCIAL","Presidencial","fin",12250,2,1],
+  ].map(([tipo_habitacion, nombre, tipo_dia, tarifa_noche, ocupacion_max, inventario]) =>
+    ({ tipo_habitacion, nombre, tipo_dia, tarifa_noche, ocupacion_max, inventario })),
   reglas_descuento: [
     { clave: "HAB-30", descripcion: "Descuento por bloque de 30 habitaciones o más", aplica_a: "hospedaje", campo: "habitaciones", operador: ">=", valor: 30, porcentaje: 0.10, temporada: null, activo: true },
     { clave: "HAB-50", descripcion: "Descuento por bloque de 50 habitaciones o más", aplica_a: "hospedaje", campo: "habitaciones", operador: ">=", valor: 50, porcentaje: 0.15, temporada: null, activo: true },
@@ -142,7 +143,7 @@ async function main() {
   const ESCENARIOS = [
     ["Convención corporativa, 80 personas, 2 días, 30 habitaciones, marzo (temporada alta, entre semana)",
      { fecha_inicio: "2027-03-16", personas: 80, dias: 2, habitaciones: 30, noches: 2,
-       espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-ESTANDAR" }],
+       espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-DOBLE" }],
 
     ["Boda de 150 personas en sábado de temporada alta, sin espacio indicado",
      { fecha_inicio: "2027-02-13", personas: 150, dias: 1, paquete_ayb: "PAQ-BANQUETE", montaje: "banquete" }],
@@ -155,7 +156,7 @@ async function main() {
 
     ["Bloque grande: 200 personas, 60 habitaciones, 2 noches",
      { fecha_inicio: "2027-11-19", personas: 200, dias: 2, habitaciones: 60, noches: 2,
-       espacio: "SALON-CENTRO", paquete_ayb: "PAQ-TODO", tipo_habitacion: "HAB-JUNIOR" }],
+       espacio: "SALON-CENTRO", paquete_ayb: "PAQ-TODO", tipo_habitacion: "HAB-SUITE" }],
 
     ["No cabe: 500 personas en el Kiosko",
      { fecha_inicio: "2027-03-16", personas: 500, dias: 1, espacio: "KIOSKO" }],
@@ -214,7 +215,7 @@ async function main() {
   const hablado = await voz({
     fecha_inicio: "16 de marzo de 2027",
     personas: "80", dias: "2", habitaciones: "30", noches: "2",
-    espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-ESTANDAR",
+    espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-DOBLE",
   });
   console.log(`\n  Cotización por voz →  HTTP ${hablado.estado}`);
   for (const [k, v] of Object.entries(hablado.cuerpo)) {
@@ -226,7 +227,7 @@ async function main() {
   // "PAQ-EJECUTIVO" hablando.
   const HABLADAS = [
     ["en palabras", { espacio: "Centro Avándaro", paquete_ayb: "paquete ejecutivo",
-                      tipo_habitacion: "estándar" }],
+                      tipo_habitacion: "doble" }],
     ["a medias",    { paquete_ayb: "ejecutivo" }],
     ["sin comida",  { espacio: "Centro Avándaro", paquete_ayb: "sin alimentos" }],
     ["inventado",   { espacio: "Centro Avándaro", paquete_ayb: "paquete vegano premium" }],
@@ -282,7 +283,7 @@ async function main() {
     }
   }
 
-  const esperado = 876428;
+  const esperado = 800936;   // con el tarifario real de hospedaje e ISH al 4%
   const bit = bitacora.filter((b) => b.origen === "whatsapp").pop();
   console.log(`\n  Resultado: folio ${ultimo.folio || "(ninguno)"} · ` +
     `total ${bit ? bit.total : "—"} · esperado ${esperado} · ` +

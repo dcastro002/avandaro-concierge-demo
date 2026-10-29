@@ -178,15 +178,48 @@ async function cotizar(p) {
   // --- Hospedaje
   let hab = null;
   let hospedaje = 0;
+  let nochesCobradas = [];
   if (habitaciones > 0) {
-    const tipo = String(p.tipo_habitacion || "HAB-ESTANDAR").toUpperCase();
-    hab = c.hospedaje.find((h) => h.tipo_habitacion === tipo && h.temporada === temporada.nombre);
-    if (!hab) errores.push(`No hay tarifa de ${tipo} para temporada ${temporada.nombre}.`);
-    else {
-      hospedaje = redondea(Number(hab.tarifa_noche) * habitaciones * nochesReales);
+    const tipo = String(p.tipo_habitacion || "HAB-DOBLE").toUpperCase();
+
+    // Noche por noche, no todas al tipo de día del inicio.
+    //
+    // Con el tarifario real la diferencia entre semana y fin de semana
+    // va de 7% en la doble a 79% en la presidencial. Una estancia de
+    // jueves a sábado cobrada toda como "entre semana" sale mal por
+    // miles de pesos, y el cliente lo nota al comparar con su factura.
+    for (let i = 0; i < nochesReales; i++) {
+      const esa = new Date(fecha.getTime() + i * 86400000);
+      const td = tipoDia(esa);
+      const tarifa = c.hospedaje.find((h) => h.tipo_habitacion === tipo && h.tipo_dia === td);
+      if (!tarifa) {
+        errores.push(`No hay tarifa de ${tipo} para ${td === "fin" ? "fin de semana" : "entre semana"}.`);
+        nochesCobradas = [];
+        break;
+      }
+      nochesCobradas.push({ fecha: esa.toISOString().slice(0, 10), tipo_dia: td,
+                    tarifa: Number(tarifa.tarifa_noche) });
+      hab = tarifa;
+    }
+
+    if (nochesCobradas.length) {
+      hospedaje = redondea(nochesCobradas.reduce((s, n) => s + n.tarifa, 0) * habitaciones);
+
+      // "habitaciones tipo habitación doble" es redundante.
+      const tipoCorto = hab.nombre.toLowerCase().replace(/^habitaci[oó]n\s+/, "");
       const cupo = hab.ocupacion_max * habitaciones;
       if (personas > cupo) {
-        avisos.push(`Las ${habitaciones} habitaciones alojan hasta ${cupo} personas y el evento es de ${personas}. Habría que ajustar el bloque.`);
+        avisos.push(`Las ${habitaciones} habitaciones tipo ${tipoCorto} alojan hasta ${cupo} personas y el evento es de ${personas}. Habría que ajustar el bloque.`);
+      }
+
+      // El inventario no es disponibilidad, pero sí es un techo. Pedir
+      // más habitaciones de las que existen no depende de Opera.
+      if (hab.inventario && habitaciones > hab.inventario) {
+        avisos.push(`El hotel tiene ${hab.inventario} habitaciones tipo ${tipoCorto} y se están pidiendo ${habitaciones}.`);
+      }
+
+      if (new Set(nochesCobradas.map((n) => n.tipo_dia)).size > 1) {
+        avisos.push("La estancia cruza entre semana y fin de semana; cada noche se cobra a su propia tarifa.");
       }
     }
   }
@@ -243,10 +276,18 @@ async function cotizar(p) {
   }
   if (hab) {
     desglose.push({ concepto: "Hospedaje", detalle: `${hab.nombre}, ${habitaciones} habitaciones, ${nochesReales} noche(s)`,
-      cantidad: habitaciones * nochesReales, unitario: Number(hab.tarifa_noche), importe: hospedaje });
+      cantidad: habitaciones * nochesReales,
+      unitario: nochesCobradas.length ? redondea(nochesCobradas.reduce((s, n) => s + n.tarifa, 0) / nochesCobradas.length) : 0,
+      importe: hospedaje });
   }
 
-  avisos.unshift("TARIFARIO DE PRUEBA: las cifras son ficticias y no sirven para cotizar a un cliente.");
+  // El aviso ya no es parejo: el hospedaje dejó de ser inventado. Decir
+  // que todo es de prueba cuando una parte ya es real le quita peso al
+  // aviso, y es justamente el aviso que no queremos que nadie ignore.
+  avisos.unshift(
+    hospedaje > 0
+      ? "Las tarifas de hospedaje son las que publica el hotel. Las de espacios y alimentos todavía son de prueba y no sirven para cotizar a un cliente."
+      : "TARIFARIO DE PRUEBA: las cifras de espacios y alimentos son ficticias y no sirven para cotizar a un cliente.");
   avisos.push("Disponibilidad no verificada. El inventario de salones y habitaciones vive en Opera y todavía no está conectado.");
   if (c.sinConfirmar.length) {
     avisos.push(`Parámetros pendientes de confirmar con Avándaro: ${c.sinConfirmar.join(", ")}.`);

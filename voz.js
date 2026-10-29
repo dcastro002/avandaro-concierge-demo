@@ -206,14 +206,16 @@ export function resumenVoz(c) {
 // no se le dicen a quien llama.
 // ---------------------------------------------------------------------
 export const AVISO_FIJO =
-  "Es una tarifa de referencia con cifras de prueba, y la disponibilidad todavía no está confirmada.";
+  "Es una tarifa de referencia: espacios y alimentos todavía son cifras de prueba, " +
+  "y la disponibilidad no está confirmada.";
 
 // Los avisos que salen SIEMPRE ya van en AVISO_FIJO. Repetirlos en la
 // nota haría que el agente dijera lo mismo dos veces.
 const CONSTANTES = [
   /^TARIFARIO DE PRUEBA/i,
+  /^Las tarifas de hospedaje son/i,   // la otra forma del mismo aviso
   /^Disponibilidad no verificada/i,
-  /^Parámetros pendientes/i,   // pendiente interno nuestro, no del que llama
+  /^Parámetros pendientes/i,          // pendiente interno nuestro, no del que llama
 ];
 
 // Cuántas notas aguanta alguien de oído antes de dejar de escuchar.

@@ -174,8 +174,10 @@ export function extraer(texto, { esperando, catalogos: c, hoy } = {}) {
     if (esp) campos.espacio = esp;
 
     const hab = buscarEnCatalogo(t, c.hospedaje, "tipo_habitacion", {
-      "\\b(junior|suite)\\b": "HAB-JUNIOR",
-      "\\b(estandar|sencilla|normal)\\b": "HAB-ESTANDAR",
+      "\\b(presidencial)\\b": "HAB-PRESIDENCIAL",
+      "\\b(suite|premium|junior)\\b": "HAB-SUITE",
+      "\\b(individual|sencilla|una persona)\\b": "HAB-INDIVIDUAL",
+      "\\b(doble|estandar|normal|compartida)\\b": "HAB-DOBLE",
     });
     if (hab) campos.tipo_habitacion = hab;
   }
@@ -250,6 +252,7 @@ export function textoCotizacion(c) {
 export function avisosChat(c) {
   return (c.avisos || []).filter((a) =>
     !/^TARIFARIO DE PRUEBA/i.test(a) &&
+    !/^Las tarifas de hospedaje son/i.test(a) &&   // la otra forma del mismo aviso
     !/^Par[aá]metros pendientes/i.test(a) &&
     !/^Disponibilidad no verificada/i.test(a));
 }
