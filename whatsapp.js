@@ -161,35 +161,50 @@ export function extraer(texto, { esperando, catalogos: c, hoy } = {}) {
     //
     // El orden importa: lo más específico primero, porque "cena
     // emplatada premium" también encaja con "cena".
+    // Cada pista trae su familia. Dentro de una familia gana el primer
+    // patrón que encaje y ahí se detiene.
+    //
+    // Eso no es cosmético. Antes se revisaban todos los patrones y, si
+    // la clave del específico no existía en el catálogo, el genérico
+    // seguía corriendo: "comida emplatada estándar" terminaba cobrando
+    // comida buffet, 430 en lugar de 680, sin que nadie se enterara.
+    // Una clave faltante tiene que ser un aviso visible, nunca un
+    // cambio silencioso por algo más barato.
     const PISTAS_AYB = [
-      [/\bdesayuno\s+emplatad/, "AYB-DESAYUNO_EMPLATADO"],
-      [/\bdesayuno/, "AYB-DESAYUNO_BUFFET"],
-      [/\bcomida\s+emplatada\s+premium/, "AYB-COMIDA_EMPLATADO_PREMIUM"],
-      [/\bcomida\s+emplatad/, "AYB-COMIDA_EMPLATADO_ESTANDAR"],
-      [/\bcomida\b/, "AYB-COMIDA_BUFFET"],
-      [/\bcena\s+emplatada\s+premium/, "AYB-CENA_EMPLATADO_PREMIUM"],
-      [/\bcena\s+emplatad/, "AYB-CENA_EMPLATADO_ESTANDAR"],
-      [/\bcena\b/, "AYB-CENA_BUFFET"],
-      [/\b(coffee|cafe|cafecito|solo caf)/, "AYB-COFFEE_BREAK_ESTANDAR"],
-      [/\bbox\s*lunch/, "AYB-BOX_LUNCH_AVANDARO"],
-      [/\bcanap/, "AYB-CANAPES_6"],
-      [/\bbarra\s+(de\s+)?cerveza/, "AYB-BARRA_CERVEZAS"],
-      [/\b(barra\s+mix|vino y cerveza)/, "AYB-BARRA_MIX"],
-      [/\bbarra\s+sin\s+alcohol/, "AYB-BARRA_SIN_ALCOHOL"],
-      [/\b(hidrataci|aguas frescas)/, "AYB-BARRA_HIDRATACION"],
-      [/\bfogata/, "AYB-FOGATADA_ESTANDAR"],
-      [/\btorna\s*fiesta/, "AYB-TORNA_FIESTA_BASICO"],
-      [/\bsnack/, "AYB-SNACKS_ADICIONALES"],
-      [/\bdescorche/, "AYB-DESCORCHE"],
+      ["desayuno", /\bdesayuno\s+emplatad/, "AYB-DESAYUNO_EMPLATADO"],
+      ["desayuno", /\bdesayuno/, "AYB-DESAYUNO_BUFFET"],
+      ["comida", /\bcomida\s+emplatada\s+premium/, "AYB-COMIDA_EMPLATADO_PREMIUM"],
+      ["comida", /\bcomida\s+emplatad/, "AYB-COMIDA_EMPLATADO_ESTANDAR"],
+      ["comida", /\bcomida\b/, "AYB-COMIDA_BUFFET"],
+      ["cena", /\bcena\s+emplatada\s+premium/, "AYB-CENA_EMPLATADO_PREMIUM"],
+      ["cena", /\bcena\s+emplatad/, "AYB-CENA_EMPLATADO_ESTANDAR"],
+      ["cena", /\bcena\b/, "AYB-CENA_BUFFET"],
+      ["coffee", /\b(coffee|cafe|cafecito|solo caf)/, "AYB-COFFEE_BREAK_ESTANDAR"],
+      ["box", /\bbox\s*lunch/, "AYB-BOX_LUNCH_AVANDARO"],
+      ["canapes", /\bcanap/, "AYB-CANAPES_6"],
+      ["barra", /\bbarra\s+(de\s+)?cerveza/, "AYB-BARRA_CERVEZAS"],
+      ["barra", /\b(barra\s+mix|vino y cerveza)/, "AYB-BARRA_MIX"],
+      ["barra", /\bbarra\s+sin\s+alcohol/, "AYB-BARRA_SIN_ALCOHOL"],
+      ["barra", /\b(hidrataci|aguas frescas)/, "AYB-BARRA_HIDRATACION"],
+      ["fogata", /\bfogata/, "AYB-FOGATADA_ESTANDAR"],
+      ["torna", /\btorna\s*fiesta/, "AYB-TORNA_FIESTA_BASICO"],
+      ["snack", /\bsnack/, "AYB-SNACKS_ADICIONALES"],
+      ["descorche", /\bdescorche/, "AYB-DESCORCHE"],
     ];
     const existe = new Set((c.alimentos ?? []).map((a) => a.clave));
     const halladas = [];
-    for (const [patron, clave] of PISTAS_AYB) {
-      if (patron.test(t) && existe.has(clave) && !halladas.includes(clave)) {
-        halladas.push(clave);
-      }
+    const faltantes = [];
+    const familiasVistas = new Set();
+    for (const [familia, patron, clave] of PISTAS_AYB) {
+      if (familiasVistas.has(familia) || !patron.test(t)) continue;
+      familiasVistas.add(familia);
+      if (!existe.has(clave)) { faltantes.push(clave); continue; }
+      if (!halladas.includes(clave)) halladas.push(clave);
     }
     if (halladas.length) campos.alimentos = halladas;
+    if (faltantes.length) {
+      console.error(`Alimentos que el catálogo no tiene: ${faltantes.join(", ")}`);
+    }
   }
 
   if (c) {

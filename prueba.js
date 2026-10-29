@@ -88,7 +88,7 @@ const DATOS = {
     { clave: "AYB-CENA_EMPLATADO_ESTANDAR", nombre: "Cena emplatada estándar", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
     { clave: "AYB-CENA_EMPLATADO_PREMIUM", nombre: "Cena emplatada premium", precio_persona: 790, por_hora: false, duracion_horas: 1, activo: true },
     { clave: "AYB-COMIDA_BUFFET", nombre: "Comida buffet", precio_persona: 430, por_hora: false, duracion_horas: 1, minimo_personas: 15, activo: true },
-    { clave: "AYB-COMIDA_EMPLATADO_ESTANDA", nombre: "Comida emplatada estándar", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-COMIDA_EMPLATADO_ESTANDAR", nombre: "Comida emplatada estándar", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
     { clave: "AYB-COMIDA_EMPLATADO_PREMIUM", nombre: "Comida emplatada premium", precio_persona: 790, por_hora: false, duracion_horas: 1, activo: true },
     { clave: "AYB-DESAYUNO_BUFFET", nombre: "Desayuno buffet", precio_persona: 580, por_hora: false, duracion_horas: 1, minimo_personas: 15, activo: true },
     { clave: "AYB-DESAYUNO_EMPLATADO", nombre: "Desayuno emplatado", precio_persona: 400, por_hora: false, duracion_horas: 1, activo: true },
@@ -411,6 +411,69 @@ async function main() {
     }
     await writeFile(process.env.VOLCADO, JSON.stringify(captura, null, 2));
     console.log(`\nVolcado: ${captura.length} escenarios en ${process.env.VOLCADO}`);
+  }
+
+  // -------------------------------------------------------------------
+  // El motor de respaldo y los alimentos
+  //
+  // Esto existe por un error que ya pasó. Una clave del catálogo quedó
+  // cortada (COMIDA_EMPLATADO_ESTANDA, sin la R), el respaldo no la
+  // encontró, cayó al patrón genérico de "comida" y cobró buffet a 430
+  // en lugar de emplatado a 680. Con 80 personas son veinte mil pesos
+  // de menos, en una cotización que nadie habría revisado.
+  //
+  // Lo que se prueba no es que acierte, es que NUNCA sustituya por algo
+  // más barato: si la clave específica falta, no debe cobrar nada.
+  // -------------------------------------------------------------------
+  console.log("\n" + "=".repeat(78));
+  console.log("MOTOR DE RESPALDO · resolución de alimentos");
+  console.log("=".repeat(78));
+  {
+    const { extraer } = await import("./whatsapp.js");
+
+    // extraer espera la forma que arma catalogos(), no los nombres de
+    // tabla: pide c.hospedaje, no c.tarifas_hospedaje. Pasarle DATOS tal
+    // cual reventaba con "lista is not iterable".
+    const CAT = {
+      espacios: DATOS.espacios,
+      hospedaje: DATOS.tarifas_hospedaje,
+      alimentos: DATOS.alimentos,
+    };
+
+    const casos = [
+      // El orden es el del listado de pistas, no el de la frase. Da
+      // igual porque el importe es una suma, pero la prueba tiene que
+      // esperar lo que de verdad hace.
+      ["desayuno buffet, coffee break y comida buffet",
+       ["AYB-DESAYUNO_BUFFET", "AYB-COMIDA_BUFFET", "AYB-COFFEE_BREAK_ESTANDAR"]],
+      ["comida emplatada estándar",     ["AYB-COMIDA_EMPLATADO_ESTANDAR"]],
+      ["comida emplatada premium",      ["AYB-COMIDA_EMPLATADO_PREMIUM"]],
+      ["cena emplatada premium",        ["AYB-CENA_EMPLATADO_PREMIUM"]],
+      ["desayuno emplatado y cena buffet",
+       ["AYB-DESAYUNO_EMPLATADO", "AYB-CENA_BUFFET"]],
+      ["barra de cervezas",             ["AYB-BARRA_CERVEZAS"]],
+    ];
+    let fallas = 0;
+    for (const [frase, esperado] of casos) {
+      const r = extraer(frase, { catalogos: CAT }).campos.alimentos ?? [];
+      const ok = JSON.stringify(r) === JSON.stringify(esperado);
+      if (!ok) fallas++;
+      console.log(`  ${ok ? "ok   " : "FALLA"}  "${frase}"`);
+      if (!ok) console.log(`           dio: ${JSON.stringify(r)}`);
+    }
+
+    // Una clave ausente no debe degradar a la genérica más barata.
+    const sinEmplatado = {
+      ...CAT,
+      alimentos: CAT.alimentos.filter((a) => a.clave !== "AYB-COMIDA_EMPLATADO_ESTANDAR"),
+    };
+    const r = extraer("comida emplatada estándar", { catalogos: sinEmplatado }).campos.alimentos;
+    const ok = r === undefined;
+    if (!ok) fallas++;
+    console.log(`  ${ok ? "ok   " : "FALLA"}  sin la clave en el catálogo: no cobra nada` +
+                (ok ? "" : `, pero dio ${JSON.stringify(r)}`));
+
+    console.log(fallas ? `\n  ${fallas} FALLAS` : "\n  los 7 casos pasan");
   }
 
   console.log("\n" + "=".repeat(78));
