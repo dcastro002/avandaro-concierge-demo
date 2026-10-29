@@ -23,7 +23,8 @@ let cacheHasta = 0;
 
 async function catalogos() {
   if (cache && Date.now() < cacheHasta) return cache;
-  const [parametros, temporadas, espacios, tarifas, paquetes, hospedaje, reglas] =
+  const [parametros, temporadas, espacios, tarifas, paquetes, hospedaje, reglas,
+         experiencias, alimentos, salones] =
     await Promise.all([
       db.consultar("parametros?select=*"),
       db.consultar("temporadas?select=*"),
@@ -32,11 +33,17 @@ async function catalogos() {
       db.consultar("paquetes_ayb?select=*&activo=eq.true"),
       db.consultar("tarifas_hospedaje?select=*"),
       db.consultar("reglas_descuento?select=*&activo=eq.true"),
+      // Las tres últimas pueden no existir todavía: el cotizador
+      // funcionaba antes de que cargáramos el tarifario real.
+      db.consultar("experiencias?select=*&activo=eq.true").catch(() => []),
+      db.consultar("alimentos?select=*&activo=eq.true").catch(() => []),
+      db.consultar("salones?select=*&activo=eq.true").catch(() => []),
     ]);
   cache = {
     parametros: Object.fromEntries(parametros.map((p) => [p.clave, Number(p.valor)])),
     sinConfirmar: parametros.filter((p) => !p.confirmado).map((p) => p.clave),
-    temporadas, espacios, tarifas, paquetes, hospedaje, reglas,
+    temporadas, espacios, tarifas, paquetes, hospedaje, reglas, experiencias,
+    alimentos, salones,
   };
   cacheHasta = Date.now() + 5 * 60 * 1000;
   return cache;
@@ -89,6 +96,43 @@ function mejorRegla(reglas, concepto, datos, temporada) {
 const redondea = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const dinero = (n) =>
   new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(n);
+
+// ---------------------------------------------------------------------
+// Precio de una actividad
+//
+// Esto replica la función con la que el propio cotizador del hotel cobra
+// las actividades. Hay dos formas y no son intercambiables:
+//
+//   por_persona   el precio se multiplica por los asistentes
+//   por_tramo     el monto del tramo se cobra PLANO, sin multiplicar
+//
+// Lo segundo se ve raro hasta que se ven las cifras: el circuito de
+// energía cuesta 82,399.99 para un grupo de 51 a 60 personas, no 82,399.99
+// por cada una. Se confirmó contra una cotización real del hotel, folio
+// AVA-2026-10290754: el coaching ejecutivo para 12 personas salió en
+// 2,100, que es exactamente el monto del tramo de 11 a 19.
+//
+// Si el grupo se sale de todos los tramos se usa el último, igual que
+// hace su código. El aforo se avisa aparte, antes de llegar aquí.
+// ---------------------------------------------------------------------
+function precioActividad(e, personas) {
+  const tramos = Array.isArray(e.tramos) ? e.tramos : null;
+  if (tramos && tramos.length) {
+    const t = tramos.find((x) =>
+      personas >= Number(x.desde) && personas <= Number(x.hasta));
+    return Number((t ?? tramos[tramos.length - 1]).monto);
+  }
+  return Number(e.precio_persona ?? 0) * personas;
+}
+
+// El catálogo guarda las horas como número; antes venían como texto
+// ("3 horas"). Se aceptan las dos para no depender del orden de carga.
+function duracionTexto(e) {
+  if (e.duracion) return String(e.duracion);
+  const h = Number(e.duracion_horas);
+  if (!h) return null;
+  return h === 1 ? "1 hora" : `${h} horas`;
+}
 
 // =====================================================================
 // Motor
@@ -155,23 +199,80 @@ async function cotizar(p) {
   }
 
   // --- Renta del espacio
+  //
+  // El hotel no cobra por salón: cobra por bloques de 25 personas, al
+  // mismo precio en cualquiera de sus sedes, por cada día con sesión.
+  // Un grupo de 80 son cuatro bloques, quepan donde quepan.
+  //
+  // La tarifa por salón y temporada que teníamos antes era inventada.
+  // La fila de cot.tarifas_espacio se sigue buscando, pero solo por el
+  // consumo mínimo, y ya no es obligatoria: antes su ausencia tumbaba
+  // la cotización completa.
   const tar = c.tarifas.find((t) =>
-    t.espacio === espacio.clave && t.temporada === temporada.nombre && t.tipo_dia === dia);
-  if (!tar) {
-    errores.push(`No hay tarifa cargada para ${espacio.nombre} en temporada ${temporada.nombre}, día de ${dia}.`);
-    return { ok: false, errores };
+    t.espacio === espacio.clave && t.temporada === temporada.nombre && t.tipo_dia === dia) ?? null;
+
+  const tamBloque = c.parametros.salon_bloque_personas ?? 25;
+  const precioBloque = c.parametros.salon_bloque_precio ?? 0;
+  const bloques = Math.ceil(personas / tamBloque);
+  const renta = redondea(bloques * precioBloque * dias);
+
+  if (!precioBloque) {
+    avisos.push("No está cargado el precio de bloque de salón; la cotización va sin renta de espacio.");
   }
-  const renta = redondea(Number(tar.tarifa_dia) * dias);
 
   // --- Alimentos y bebidas
+  // Dos caminos, y el real gana.
+  //
+  //   p.alimentos    lista contra cot.alimentos, el catálogo del hotel
+  //   p.paquete_ayb  los paquetes que nos habíamos inventado
+  //
+  // Los paquetes siguen ahí porque el workflow de HubSpot ya manda ese
+  // campo y quitarlo lo rompería. Pero sus cifras son de prueba, y el
+  // aviso del final lo dice.
   let paquete = null;
   let ayb = 0;
-  if (p.paquete_ayb) {
+  const comidas = [];
+  const comidasNoHalladas = [];
+  const comidasBajoMinimo = [];
+
+  const pedidasAyb = []
+    .concat(p.alimentos ?? [])
+    .flatMap((x) => String(x).split(/\s*[,;]\s*|\s+y\s+/))
+    .map((x) => x.trim()).filter(Boolean);
+
+  for (const texto of pedidasAyb) {
+    const clave = resolverClave(texto, c.alimentos ?? [], "clave");
+    const a = (c.alimentos ?? []).find((x) => x.clave === clave);
+    if (!a) { comidasNoHalladas.push(texto); continue; }
+    if (a.minimo_personas && personas < Number(a.minimo_personas)) {
+      comidasBajoMinimo.push(a); continue;
+    }
+    // Las barras se cobran por persona POR HORA; el resto por persona.
+    const horas = a.por_hora ? Number(a.duracion_horas || 1) : 1;
+    const importe = redondea(Number(a.precio_persona) * personas * horas * dias);
+    comidas.push({
+      clave: a.clave, nombre: a.nombre, subgrupo: a.subgrupo ?? null,
+      precio_persona: Number(a.precio_persona), por_hora: !!a.por_hora,
+      horas: a.por_hora ? horas : null, importe,
+    });
+  }
+
+  if (comidas.length) {
+    ayb = redondea(comidas.reduce((s, x) => s + x.importe, 0));
+  } else if (p.paquete_ayb) {
     paquete = c.paquetes.find((q) => q.clave === String(p.paquete_ayb).toUpperCase());
     if (!paquete) errores.push(`El paquete ${p.paquete_ayb} no existe.`);
     else ayb = redondea(Number(paquete.precio_persona) * personas * dias);
-  } else {
+  }
+
+  if (!ayb && !pedidasAyb.length && !p.paquete_ayb) {
     avisos.push("No se especificó paquete de alimentos; la cotización va sin consumo.");
+  }
+  for (const a of comidasBajoMinimo) {
+    avisos.push(`${a.nombre} pide un mínimo de ${a.minimo_personas} personas y el grupo es de ${personas}; queda fuera de la cotización.`);
+  }
+  if (comidasNoHalladas.length) {
+    avisos.push(`No encontré en el catálogo de alimentos: ${comidasNoHalladas.join(", ")}.`);
   }
   if (errores.length) return { ok: false, errores };
 
@@ -252,24 +353,132 @@ async function cotizar(p) {
   const baseHosp = redondea(hospedaje - dHosp);
 
   // --- Consumo mínimo del espacio
-  if (Number(tar.consumo_minimo) > 0 && baseAyb < Number(tar.consumo_minimo)) {
+  if (tar && Number(tar.consumo_minimo) > 0 && baseAyb < Number(tar.consumo_minimo)) {
     avisos.push(`El consumo de alimentos (${dinero(baseAyb)}) queda por debajo del mínimo de ${dinero(tar.consumo_minimo)} que pide ${espacio.nombre}. Comercial tendría que autorizarlo o subir el paquete.`);
   }
 
-  // --- Impuestos. Las tasas vienen de cot.parametros y NO están
-  //     confirmadas con el área fiscal de Avándaro.
+  // --- Impuestos.
+  //
+  // No van sobre todo el subtotal. Cada concepto lleva lo suyo, y así es
+  // como lo cobra el hotel en su propio cotizador:
+  //
+  //   hospedaje     IVA 16% + ISH 4%            factor 1.20
+  //   alimentos     IVA 16% + 15% de servicio   factor 1.31
+  //   espacios      nada
+  //   actividades   nada
+  //
+  // Los dos factores salen de su código y son aditivos, no compuestos:
+  // el servicio no causa IVA. Que espacios y actividades no lleven
+  // impuesto es decisión de ellos, no nuestra, y quedó por escrito en
+  // sql/tarifario_real.sql para preguntárselo.
   const servicio = redondea(baseAyb * (c.parametros.servicio ?? 0));
   const subtotal = redondea(baseEspacio + baseAyb + servicio + baseHosp);
-  const iva = redondea(subtotal * (c.parametros.iva ?? 0));
+  const iva = redondea((baseAyb + baseHosp) * (c.parametros.iva ?? 0));
   const ish = redondea(baseHosp * (c.parametros.ish ?? 0));
-  const total = redondea(subtotal + iva + ish);
+
+  // --- Propinas. Van por habitación, no por persona, y se suman DESPUÉS
+  //     de impuestos: así las cobra el hotel en su propia cotización.
+  //     Las camaristas por noche; los bellboys una vez por estancia.
+  const propinas = habitaciones > 0
+    ? redondea(habitaciones * nochesReales * (c.parametros.propina_camarista ?? 0) +
+               habitaciones * (c.parametros.propina_bellboy ?? 0))
+    : 0;
+
+  // --- Experiencias.
+  //
+  // Se suman después de impuestos, igual que las presenta el hotel en su
+  // propia cotización: ahí las actividades aparecen como un importe
+  // cerrado que se agrega al total de hospedaje ya con IVA.
+  //
+  // Las que el hotel marcó para cotizar con su área NO se cobran ni se
+  // estiman: se nombran en un aviso. Las fogatas son el ejemplo de por
+  // qué: el propio hotel dejó por escrito que no sabe si los 500 son
+  // por fogata o por persona, y con 80 asistentes esa duda vale casi
+  // cuarenta mil pesos.
+  const pedidas = []
+    .concat(p.experiencias ?? [])
+    .flatMap((x) => String(x).split(/\s*[,;]\s*|\s+y\s+/))
+    .map((x) => x.trim()).filter(Boolean);
+
+  const experiencias = [];
+  const porCotizar = [];
+  const noHalladas = [];
+  const fueraDeAforo = [];
+  const porConfirmar = [];
+
+  for (const texto of pedidas) {
+    const clave = resolverClave(texto, c.experiencias ?? [], "clave");
+    const e = (c.experiencias ?? []).find((x) => x.clave === clave);
+    if (!e) { noHalladas.push(texto); continue; }
+    if (e.cotizar_aparte) { porCotizar.push(e); continue; }
+
+    // El tope del último tramo es el aforo de la actividad. Mejor decirlo
+    // antes de cotizar que mandar un número que el hotel no puede cumplir.
+    if (e.maximo_personas && personas > Number(e.maximo_personas)) {
+      fueraDeAforo.push(e); continue;
+    }
+
+    const importe = redondea(precioActividad(e, personas));
+    if (e.nota) porConfirmar.push(e);
+    experiencias.push({
+      clave: e.clave, nombre: e.nombre,
+      duracion: duracionTexto(e),
+      modo_cobro: e.modo_cobro ?? "por_persona",
+      precio_persona: e.modo_cobro === "por_tramo" ? null : Number(e.precio_persona ?? 0),
+      importe,
+    });
+  }
+
+  const totalExperiencias = redondea(experiencias.reduce((s, e) => s + e.importe, 0));
+
+  for (const e of porCotizar) {
+    avisos.push(
+      `${e.nombre}${duracionTexto(e) ? ` (${duracionTexto(e)})` : ""} va fuera de esta cotización: ` +
+      `el tarifario de actividades todavía no lo tenemos.` +
+      (e.nota ? ` ${e.nota}` : ""));
+  }
+  for (const e of fueraDeAforo) {
+    avisos.push(
+      `${e.nombre} llega hasta ${e.maximo_personas} personas y el grupo es de ${personas}. ` +
+      `Habría que partirlo en grupos o pedirle a Avándaro una cotización especial.`);
+  }
+  if (noHalladas.length) {
+    avisos.push(`No encontré en el catálogo: ${noHalladas.join(", ")}. Habría que confirmarlas con el área de experiencias.`);
+  }
+  for (const e of porConfirmar) {
+    avisos.push(`${e.nombre}: ${e.nota}`);
+  }
+  if (totalExperiencias > 0) {
+    avisos.push("Las actividades van al precio del cotizador del hotel y, como en su cotización, se suman al total sin impuesto adicional.");
+  }
+
+  const total = redondea(subtotal + iva + ish + propinas + totalExperiencias);
 
   const vigencia = new Date(Date.now() + (c.parametros.vigencia_dias ?? 15) * 86400000);
 
+  // El detalle ya no habla de temporada ni de tipo de día, porque la
+  // renta dejó de depender de eso: son bloques de 25 personas. Y el
+  // unitario sale del precio de bloque, no de tar.tarifa_dia, que puede
+  // venir nulo desde que la fila de tarifas_espacio es opcional.
   const desglose = [
-    { concepto: "Renta de espacio", detalle: `${espacio.nombre}, ${dias} día(s), temporada ${temporada.nombre}, día de ${dia}`,
-      cantidad: dias, unitario: Number(tar.tarifa_dia), importe: renta },
+    { concepto: "Renta de espacio",
+      detalle: `${espacio.nombre}, ${bloques} bloque(s) de ${tamBloque} personas, ${dias} día(s)`,
+      cantidad: bloques * dias, unitario: precioBloque, importe: renta },
   ];
+  for (const x of comidas) {
+    desglose.push({
+      concepto: "Alimentos y bebidas",
+      // Con una sola partida bastaba el concepto. Con tres salían tres
+      // renglones iguales que decían "Alimentos y bebidas" y un monto,
+      // sin que el cliente supiera cuál era cuál.
+      etiqueta: x.nombre,
+      detalle: `${x.nombre}, ${personas} personas` +
+        (x.por_hora ? ` × ${x.horas} h` : "") + (dias > 1 ? `, ${dias} día(s)` : ""),
+      cantidad: personas * dias * (x.horas ?? 1),
+      unitario: x.precio_persona,
+      importe: x.importe,
+    });
+  }
   if (paquete) {
     desglose.push({ concepto: "Alimentos y bebidas", detalle: `${paquete.nombre}, ${personas} personas, ${dias} día(s)`,
       cantidad: personas * dias, unitario: Number(paquete.precio_persona), importe: ayb });
@@ -280,14 +489,46 @@ async function cotizar(p) {
       unitario: nochesCobradas.length ? redondea(nochesCobradas.reduce((s, n) => s + n.tarifa, 0) / nochesCobradas.length) : 0,
       importe: hospedaje });
   }
+  // Las actividades NO van aquí. Van en su propio arreglo, porque se
+  // suman después de impuestos y porque quien arma el texto las recorre
+  // aparte. Meterlas al desglose las imprimía dos veces en el mensaje
+  // que ve el cliente.
 
   // El aviso ya no es parejo: el hospedaje dejó de ser inventado. Decir
   // que todo es de prueba cuando una parte ya es real le quita peso al
   // aviso, y es justamente el aviso que no queremos que nadie ignore.
-  avisos.unshift(
-    hospedaje > 0
-      ? "Las tarifas de hospedaje son las que publica el hotel. Las de espacios y alimentos todavía son de prueba y no sirven para cotizar a un cliente."
-      : "TARIFARIO DE PRUEBA: las cifras de espacios y alimentos son ficticias y no sirven para cotizar a un cliente.");
+  //
+  // Ahora son tres niveles, no dos. Hospedaje y actividades salen del
+  // cotizador del propio hotel. Espacios y alimentos siguen siendo
+  // cifras de prueba hasta que carguemos su tarifario real.
+  const reales = [];
+  if (hospedaje > 0) reales.push("hospedaje");
+  if (renta > 0) reales.push("espacios");
+  if (comidas.length) reales.push("alimentos");
+  if (totalExperiencias > 0) reales.push("actividades");
+  const ficticias = [];
+  // Solo queda una cosa inventada: los paquetes de alimentos, que siguen
+  // ahí porque el workflow de HubSpot todavía manda paquete_ayb.
+  if (paquete) ficticias.push("alimentos");
+
+  // "hospedaje y espacios y alimentos" era lo que salía con un join
+  // simple. Tres conceptos piden coma y una sola conjunción.
+  const enumera = (xs) => xs.length < 2
+    ? (xs[0] ?? "")
+    : `${xs.slice(0, -1).join(", ")} y ${xs[xs.length - 1]}`;
+
+  if (!ficticias.length && reales.length) {
+    avisos.unshift(
+      `Las tarifas de ${enumera(reales)} son las que publica el hotel.`);
+  } else if (reales.length) {
+    avisos.unshift(
+      `Las tarifas de ${enumera(reales)} son las que publica el hotel. ` +
+      `Las de ${enumera(ficticias)} todavía son de prueba y no sirven para cotizar a un cliente.`);
+  } else if (ficticias.length) {
+    avisos.unshift(
+      `TARIFARIO DE PRUEBA: las cifras de ${enumera(ficticias)} son ficticias ` +
+      `y no sirven para cotizar a un cliente.`);
+  }
   avisos.push("Disponibilidad no verificada. El inventario de salones y habitaciones vive en Opera y todavía no está conectado.");
   if (c.sinConfirmar.length) {
     avisos.push(`Parámetros pendientes de confirmar con Avándaro: ${c.sinConfirmar.join(", ")}.`);
@@ -309,12 +550,16 @@ async function cotizar(p) {
     evento: { personas, dias, habitaciones, noches: nochesReales,
               paquete: paquete?.nombre ?? null, habitacion: hab?.nombre ?? null },
     desglose,
+    // Van aparte del desglose porque se suman después de impuestos.
+    experiencias,
     descuentos,
     importes: {
       renta_espacio: renta, alimentos: ayb, hospedaje,
       descuento_total: redondea(dEspacio + dAyb + dHosp),
-      cargo_servicio: servicio, subtotal, iva, ish, total,
+      cargo_servicio: servicio, subtotal, iva, ish, propinas,
+      experiencias: totalExperiencias, total,
       anticipo: redondea(total * (c.parametros.anticipo_pct ?? 0.5)),
+      saldo_dias_antes: c.parametros.saldo_dias_antes ?? null,
     },
     total_texto: dinero(total),
     avisos,
@@ -371,10 +616,21 @@ export function montar(app, { cliente, token }) {
                                     cap_banquete, cap_coctel, cap_escuela, notas }) =>
           ({ clave, nombre, tipo, interior, cap_auditorio, cap_banquete,
              cap_coctel, cap_escuela, notas })),
-        paquetes: c.paquetes.map(({ clave, nombre, precio_persona, incluye }) =>
+        salones: (c.salones ?? []).map(({ clave, nombre, capacidad_por_montaje,
+                                          capacidad_maxima }) =>
+          ({ clave, nombre, capacidad_por_montaje, capacidad_maxima })),
+        alimentos: (c.alimentos ?? []).map(({ clave, nombre, subgrupo,
+                                              precio_persona, por_hora, minimo_personas }) =>
+          ({ clave, nombre, subgrupo, precio_persona, por_hora, minimo_personas })),
+        actividades: (c.experiencias ?? []).map(({ clave, nombre, categoria,
+                                                   modo_cobro, precio_persona,
+                                                   tramos, maximo_personas }) =>
+          ({ clave, nombre, categoria, modo_cobro, precio_persona, tramos, maximo_personas })),
+        paquetes_de_prueba: c.paquetes.map(({ clave, nombre, precio_persona, incluye }) =>
           ({ clave, nombre, precio_persona, incluye })),
         habitaciones: [...new Set(c.hospedaje.map((h) => h.tipo_habitacion))],
-        aviso: "Tarifario de prueba. Las cifras son ficticias.",
+        aviso: "Hospedaje, espacios, alimentos y actividades son del tarifario del hotel. " +
+               "Lo único de prueba son los paquetes de alimentos, en paquetes_de_prueba.",
       });
     } catch (e) {
       r.status(500).json({ error: e.message });
@@ -448,9 +704,14 @@ export function montar(app, { cliente, token }) {
       habitaciones: aNumero(cuerpo.habitaciones) ?? 0,
       noches: aNumero(cuerpo.noches) ?? 0,
       espacio: resolverClave(cuerpo.espacio, c.espacios, "clave"),
-      paquete_ayb: resolverClave(cuerpo.paquete_ayb ?? cuerpo.alimentos, c.paquetes, "clave"),
+      // cuerpo.alimentos ya no cae en paquete_ayb. Antes sí, cuando los
+      // paquetes eran lo único que había; ahora es la lista contra el
+      // catálogo real y mandarla a paquetes la habría tirado.
+      paquete_ayb: resolverClave(cuerpo.paquete_ayb, c.paquetes, "clave"),
+      alimentos: cuerpo.alimentos || undefined,
       tipo_habitacion: resolverClave(cuerpo.tipo_habitacion, c.hospedaje, "tipo_habitacion"),
       montaje: cuerpo.montaje || undefined,
+      experiencias: cuerpo.experiencias || undefined,
     };
 
     let salida;

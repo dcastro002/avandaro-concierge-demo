@@ -240,9 +240,15 @@ export function textoCotizacion(c) {
   l.push("");
   l.push(`Subtotal: ${pesos(c.importes.subtotal)}`);
   l.push(`Impuestos: ${pesos(c.importes.iva + c.importes.ish)}`);
+  if (c.importes.propinas) {
+    l.push(`Propinas de camaristas y bellboys: ${pesos(c.importes.propinas)}`);
+  }
   l.push(`*Total: ${c.total_texto}*`);
   l.push("");
   l.push(`Anticipo para apartar: ${pesos(c.importes.anticipo)}`);
+  if (c.importes.saldo_dias_antes) {
+    l.push(`El saldo se cubre ${c.importes.saldo_dias_antes} días antes del evento.`);
+  }
   l.push(`Vigencia: ${fechaEnLetras(c.vigencia)}`);
   return l.join("\n");
 }

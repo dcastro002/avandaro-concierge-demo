@@ -205,15 +205,17 @@ export function resumenVoz(c) {
 // Los pendientes internos (qué parámetros falta confirmar con Avándaro)
 // no se le dicen a quien llama.
 // ---------------------------------------------------------------------
+// Las cifras ya son del tarifario del hotel, así que decir que son de
+// prueba era falso y le quitaba peso a lo que sí sigue sin confirmar:
+// la disponibilidad, que depende de Opera.
 export const AVISO_FIJO =
-  "Es una tarifa de referencia: espacios y alimentos todavía son cifras de prueba, " +
-  "y la disponibilidad no está confirmada.";
+  "Es una tarifa de referencia y la disponibilidad no está confirmada.";
 
 // Los avisos que salen SIEMPRE ya van en AVISO_FIJO. Repetirlos en la
 // nota haría que el agente dijera lo mismo dos veces.
 const CONSTANTES = [
   /^TARIFARIO DE PRUEBA/i,
-  /^Las tarifas de hospedaje son/i,   // la otra forma del mismo aviso
+  /^Las tarifas de /i,                // todas las formas del mismo aviso
   /^Disponibilidad no verificada/i,
   /^Parámetros pendientes/i,          // pendiente interno nuestro, no del que llama
 ];
@@ -224,15 +226,26 @@ const MAX_NOTAS = 2;
 export function avisosVoz(c) {
   const variables = (c.avisos || []).filter((a) => !CONSTANTES.some((re) => re.test(a)));
 
-  // Lo que cambia el precio va primero. Que falte el paquete de
-  // alimentos es lo más grave: la cifra sale baja y quien llama se
-  // queda con una expectativa equivocada.
+  // Lo que cambia el precio va primero.
+  //
+  // Arriba de todo va que algo de lo que pidieron no exista o no quepa,
+  // porque la cotización sale SIN eso y sin el aviso nadie se entera.
+  // Con solo dos espacios de nota, esto se estaba perdiendo: alguien
+  // pedía un paquete que no existe y se le cotizaba el evento sin
+  // comida, en silencio.
+  //
+  // Después, que falte el paquete de alimentos: la cifra sale baja y
+  // quien llama se queda con una expectativa equivocada.
   const peso = (a) =>
-    /no se especificó paquete/i.test(a) ? 0 :
-    /por debajo del mínimo/i.test(a)    ? 1 :
-    /alojan hasta/i.test(a)             ? 2 :
-    /espacio exterior/i.test(a)         ? 3 :
-    /sugerido automáticamente/i.test(a) ? 4 : 5;
+    /no encontré en el catálogo/i.test(a) ? 0 :
+    /queda fuera de la cotización/i.test(a) ? 0 :
+    /pide un mínimo de/i.test(a)        ? 0 :
+    /llega hasta .* y el grupo/i.test(a) ? 0 :
+    /no se especificó paquete/i.test(a) ? 1 :
+    /por debajo del mínimo/i.test(a)    ? 2 :
+    /alojan hasta/i.test(a)             ? 3 :
+    /espacio exterior/i.test(a)         ? 4 :
+    /sugerido automáticamente/i.test(a) ? 5 : 6;
 
   return variables.sort((x, y) => peso(x) - peso(y)).slice(0, MAX_NOTAS);
 }

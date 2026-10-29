@@ -18,11 +18,17 @@ import { spawn } from "node:child_process";
 // el MOTOR; el tarifario se valida al cargarlo en Supabase.
 const DATOS = {
   parametros: [
-    { clave: "iva", valor: 0.16, confirmado: false },
-    { clave: "ish", valor: 0.04, confirmado: false },
-    { clave: "servicio", valor: 0.15, confirmado: false },
+    { clave: "iva", valor: 0.16, confirmado: true },
+    { clave: "ish", valor: 0.04, confirmado: true },
+    { clave: "servicio", valor: 0.15, confirmado: true },
+    // Bloques de salón: así cobra el hotel la renta de espacio.
+    { clave: "salon_bloque_personas", valor: 25, confirmado: true },
+    { clave: "salon_bloque_precio", valor: 9500, confirmado: true },
     { clave: "vigencia_dias", valor: 15, confirmado: false },
-    { clave: "anticipo_pct", valor: 0.5, confirmado: false },
+    { clave: "anticipo_pct", valor: 0.5, confirmado: true },
+    { clave: "propina_camarista", valor: 75, confirmado: true },
+    { clave: "propina_bellboy", valor: 85, confirmado: true },
+    { clave: "saldo_dias_antes", valor: 15, confirmado: true },
   ],
   temporadas: [
     { nombre: "alta", desde_mes: 12, desde_dia: 1, hasta_mes: 12, hasta_dia: 31 },
@@ -73,6 +79,28 @@ const DATOS = {
     ["HAB-PRESIDENCIAL","Presidencial","semana",6840,2,1],["HAB-PRESIDENCIAL","Presidencial","fin",12250,2,1],
   ].map(([tipo_habitacion, nombre, tipo_dia, tarifa_noche, ocupacion_max, inventario]) =>
     ({ tipo_habitacion, nombre, tipo_dia, tarifa_noche, ocupacion_max, inventario })),
+  // Las 17 actividades reales del cotizador del hotel, con su precio.
+  // Se generan desde el mismo JSON que alimenta sql/tarifario_real.sql,
+  // para que la prueba y la base no se separen.
+  experiencias: [
+    { clave: "ACT-CUATRIMOTO", nombre: "Cuatrimoto 2 horas", categoria: "Aventura y naturaleza", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 3200, cotizar_aparte: false, activo: true },
+    { clave: "ACT-HIKING-BOSQUE", nombre: "Hiking en el bosque: cascadas, La Peña, miradores", categoria: "Aventura y naturaleza", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 25, monto: 1350 }, { desde: 26, hasta: 999, monto: 1280 }], maximo_personas: 999, nota: "El monto del último tramo parece ser por persona, pero su cotizador lo cobra plano. Confirmar con Avándaro.", cotizar_aparte: false, activo: true },
+    { clave: "ACT-TOUR-RZR-2PAX", nombre: "Tour en RZR 2 PAX / 2 horas", categoria: "Aventura y naturaleza", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 4500, cotizar_aparte: false, activo: true },
+    { clave: "ACT-TOUR-RZR-4PAX", nombre: "Tour en RZR 4 PAX / 2 horas", categoria: "Aventura y naturaleza", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 6150, cotizar_aparte: false, activo: true },
+    { clave: "ACT-CENA-MARIDAJE", nombre: "Cena de maridaje estratégico", categoria: "Gastronomía y cultura", duracion_horas: 2.5, modo_cobro: "por_persona", precio_persona: 1200, cotizar_aparte: false, activo: true },
+    { clave: "ACT-COCTELERIA", nombre: "Laboratorio de coctelería empresarial", categoria: "Gastronomía y cultura", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 850, cotizar_aparte: false, activo: true },
+    { clave: "ACT-PIZZA-CIEGAS", nombre: "Pizza a ciegas", categoria: "Gastronomía y cultura", duracion_horas: 2.5, modo_cobro: "por_persona", precio_persona: 950, cotizar_aparte: false, activo: true },
+    { clave: "ACT-COACHING-EJECUTIVO", nombre: "Liderazgo y diseño del futuro: coaching ejecutivo", categoria: "Estrategia y planeación", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 2780 }, { desde: 11, hasta: 19, monto: 2100 }, { desde: 20, hasta: 999, monto: 1900 }], maximo_personas: 999, nota: "El monto del último tramo parece ser por persona, pero su cotizador lo cobra plano. Confirmar con Avándaro.", cotizar_aparte: false, activo: true },
+    { clave: "ACT-CIRCUITO-ENERGIA", nombre: "Circuito de energía", categoria: "Team building y liderazgo", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 19958.4 }, { desde: 11, hasta: 20, monto: 27466.66 }, { desde: 21, hasta: 30, monto: 41199.99 }, { desde: 31, hasta: 40, monto: 54933.33 }, { desde: 41, hasta: 50, monto: 68666.66 }, { desde: 51, hasta: 60, monto: 82399.99 }, { desde: 61, hasta: 70, monto: 82399.99 }], maximo_personas: 70, cotizar_aparte: false, activo: true },
+    { clave: "ACT-MURO-ESCALAR", nombre: "Experiencia singular: muro de escalar", categoria: "Team building y liderazgo", duracion_horas: 2, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 15041.3 }, { desde: 11, hasta: 20, monto: 26187 }, { desde: 21, hasta: 30, monto: 40068.3 }, { desde: 31, hasta: 40, monto: 50054 }, { desde: 41, hasta: 50, monto: 63775.3 }, { desde: 51, hasta: 60, monto: 72645 }], maximo_personas: 60, cotizar_aparte: false, activo: true },
+    { clave: "ACT-RALLY-TEAMBUILDING", nombre: "Rally team building: desafíos en equipo", categoria: "Team building y liderazgo", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 19958.4 }, { desde: 11, hasta: 20, monto: 27466.66 }, { desde: 21, hasta: 30, monto: 41199.99 }, { desde: 31, hasta: 40, monto: 54933.33 }, { desde: 41, hasta: 50, monto: 68666.66 }, { desde: 51, hasta: 60, monto: 82399.99 }], maximo_personas: 60, cotizar_aparte: false, activo: true },
+    { clave: "ACT-REGATA-TEAMBUILDING", nombre: "Regata Team Building", categoria: "Team building y liderazgo", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 29667 }, { desde: 11, hasta: 20, monto: 38297.49 }, { desde: 21, hasta: 30, monto: 57553.98 }, { desde: 31, hasta: 40, monto: 72764.2 }, { desde: 41, hasta: 50, monto: 81674.2 }, { desde: 51, hasta: 60, monto: 98601.39 }], maximo_personas: 60, cotizar_aparte: false, activo: true },
+    { clave: "ACT-RETOS-LIDERAZGO", nombre: "Retos de trabajo: liderazgo y trabajo en equipo", categoria: "Team building y liderazgo", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 10, monto: 19958.4 }, { desde: 11, hasta: 20, monto: 27466.66 }, { desde: 21, hasta: 30, monto: 41199.99 }, { desde: 31, hasta: 40, monto: 54933.33 }, { desde: 41, hasta: 50, monto: 68666.66 }, { desde: 51, hasta: 60, monto: 82399.99 }], maximo_personas: 60, cotizar_aparte: false, activo: true },
+    { clave: "ACT-CHI-KUNG", nombre: "Chi Kung / Meditación en movimiento", categoria: "Bienestar y relajación", duracion_horas: 1.5, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 25, monto: 1495 }, { desde: 26, hasta: 999, monto: 1350 }], maximo_personas: 999, nota: "El monto del último tramo parece ser por persona, pero su cotizador lo cobra plano. Confirmar con Avándaro.", cotizar_aparte: false, activo: true },
+    { clave: "ACT-WIM-HOF", nombre: "Método Wim Hof", categoria: "Bienestar y relajación", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 1900, cotizar_aparte: false, activo: true },
+    { clave: "ACT-RITUAL-CHAMANICO", nombre: "Ritual Chamánico Mexica", categoria: "Bienestar y relajación", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 1200, cotizar_aparte: false, activo: true },
+    { clave: "ACT-SHIN-RIN-YOKU", nombre: "Shin Rin Yoku / Baño de bosque / Caminata Velo de Novia", categoria: "Bienestar y relajación", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 850, cotizar_aparte: false, activo: true },
+  ],
   reglas_descuento: [
     { clave: "HAB-30", descripcion: "Descuento por bloque de 30 habitaciones o más", aplica_a: "hospedaje", campo: "habitaciones", operador: ">=", valor: 30, porcentaje: 0.10, temporada: null, activo: true },
     { clave: "HAB-50", descripcion: "Descuento por bloque de 50 habitaciones o más", aplica_a: "hospedaje", campo: "habitaciones", operador: ">=", valor: 50, porcentaje: 0.15, temporada: null, activo: true },
@@ -164,6 +192,21 @@ async function main() {
     ["Consumo por debajo del mínimo del espacio",
      { fecha_inicio: "2027-02-13", personas: 40, dias: 1, espacio: "SALON-CENTRO", paquete_ayb: "PAQ-COFFEE" }],
 
+    ["Grupo chico, el mismo caso que arma el cotizador público del hotel: 5 personas, 4 individuales, 2 noches",
+     { fecha_inicio: "2027-03-16", personas: 5, dias: 2, habitaciones: 4, noches: 2,
+       tipo_habitacion: "HAB-INDIVIDUAL", espacio: "SALA-CONSEJO", paquete_ayb: "PAQ-COFFEE" }],
+
+    ["Con actividades: ya las cobra, con el precio por tramo del hotel",
+     { fecha_inicio: "2027-03-16", personas: 20, dias: 1, espacio: "SALON-JARDIN",
+       paquete_ayb: "PAQ-COFFEE", experiencias: ["regata", "muro de escalar", "paseo en globo"] }],
+
+    // Dos formas de cobro en la misma cotización, y un grupo que se sale
+    // del aforo de una de ellas. El circuito de energía llega a 70
+    // personas; la cuatrimoto se cobra por cabeza sin tope.
+    ["Actividades: por tramo, por persona, y una que no cabe",
+     { fecha_inicio: "2027-03-16", personas: 80, dias: 1, espacio: "SALON-CENTRO",
+       experiencias: ["cuatrimoto", "circuito de energía", "ritual chamánico"] }],
+
     ["Faltan datos obligatorios",
      { fecha_inicio: "2027-03-16" }],
   ];
@@ -180,6 +223,9 @@ async function main() {
     for (const x of d.descuentos) console.log(`    ${("− " + x.regla).padEnd(22)} ${("-" + pesos(x.importe)).padStart(16)}   ${x.descripcion}`);
     console.log(`    ${"Subtotal".padEnd(22)} ${pesos(d.importes.subtotal).padStart(16)}`);
     console.log(`    ${"IVA + ISH".padEnd(22)} ${pesos(d.importes.iva + d.importes.ish).padStart(16)}`);
+    for (const e of d.experiencias || [])
+      console.log(`    ${("+ " + e.nombre).padEnd(22)} ${pesos(e.importe).padStart(16)}   ${e.duracion}`);
+    if (d.importes.propinas) console.log(`    ${"Propinas".padEnd(22)} ${pesos(d.importes.propinas).padStart(16)}   camaristas y bellboys, sin impuestos`);
     console.log(`    ${"TOTAL".padEnd(22)} ${pesos(d.importes.total).padStart(16)}`);
     const relevantes = d.avisos.filter((a) => !a.startsWith("TARIFARIO") && !a.startsWith("Disponibilidad") && !a.startsWith("Parámetros"));
     for (const a of relevantes) console.log(`    aviso: ${a}`);
@@ -283,7 +329,15 @@ async function main() {
     }
   }
 
-  const esperado = 800936;   // con el tarifario real de hospedaje e ISH al 4%
+  // 742,322 con el modelo de impuestos del hotel. Antes eran 807,986,
+  // cuando el IVA se aplicaba también a la renta de espacio y la renta
+  // salía de una tarifa por salón que nos habíamos inventado.
+  //
+  //   espacio       4 bloques x 9,500 x 2 días      76,000.00
+  //   alimentos     296,000 x 1.31                 387,760.00
+  //   hospedaje     226,260 x 1.20                 271,512.00
+  //   propinas      30 hab                           7,050.00
+  const esperado = 742322;
   const bit = bitacora.filter((b) => b.origen === "whatsapp").pop();
   console.log(`\n  Resultado: folio ${ultimo.folio || "(ninguno)"} · ` +
     `total ${bit ? bit.total : "—"} · esperado ${esperado} · ` +
