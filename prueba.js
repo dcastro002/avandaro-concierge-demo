@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 // el MOTOR; el tarifario se valida al cargarlo en Supabase.
 const DATOS = {
   parametros: [
-    { clave: "iva", valor: 0.16, confirmado: true },
+    { clave: "iva", valor: 0.16, confirmado: true },   // confirmado: reproduce sus factores 1.20 y 1.31
     { clave: "ish", valor: 0.04, confirmado: true },
     { clave: "servicio", valor: 0.15, confirmado: true },
     // Bloques de salón: así cobra el hotel la renta de espacio.
@@ -82,6 +82,40 @@ const DATOS = {
   // Las 17 actividades reales del cotizador del hotel, con su precio.
   // Se generan desde el mismo JSON que alimenta sql/tarifario_real.sql,
   // para que la prueba y la base no se separen.
+  // Los 26 alimentos reales del cotizador del hotel.
+  alimentos: [
+    { clave: "AYB-CENA_BUFFET", nombre: "Cena buffet", precio_persona: 430, por_hora: false, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-CENA_EMPLATADO_ESTANDAR", nombre: "Cena emplatada estándar", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-CENA_EMPLATADO_PREMIUM", nombre: "Cena emplatada premium", precio_persona: 790, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-COMIDA_BUFFET", nombre: "Comida buffet", precio_persona: 430, por_hora: false, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-COMIDA_EMPLATADO_ESTANDA", nombre: "Comida emplatada estándar", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-COMIDA_EMPLATADO_PREMIUM", nombre: "Comida emplatada premium", precio_persona: 790, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-DESAYUNO_BUFFET", nombre: "Desayuno buffet", precio_persona: 580, por_hora: false, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-DESAYUNO_EMPLATADO", nombre: "Desayuno emplatado", precio_persona: 400, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-BARRA_CERVEZAS", nombre: "Barra de cervezas", subgrupo: "Barras de bebidas", precio_persona: 270, por_hora: true, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-BARRA_HIDRATACION", nombre: "Barra de hidratación", subgrupo: "Barras de bebidas", precio_persona: 300, por_hora: true, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-BARRA_MIX", nombre: "Barra mix (vino y cerveza)", subgrupo: "Barras de bebidas", precio_persona: 380, por_hora: true, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-BARRA_SIN_ALCOHOL", nombre: "Barra sin alcohol", subgrupo: "Barras de bebidas", precio_persona: 180, por_hora: true, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-DESCORCHE", nombre: "Descorche", subgrupo: "Barras de bebidas", precio_persona: 290, por_hora: true, duracion_horas: 1, minimo_personas: 15, activo: true },
+    { clave: "AYB-BOX_LUNCH_AVANDARO", nombre: "Box lunch Avándaro", subgrupo: "Box Lunch", precio_persona: 290, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-BOX_LUNCH_BRAVO", nombre: "Box lunch Bravo", subgrupo: "Box Lunch", precio_persona: 450, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-BOX_LUNCH_JOSE", nombre: "Box lunch José", subgrupo: "Box Lunch", precio_persona: 375, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-BOX_LUNCH_VALLE_SANO", nombre: "Box lunch Valle Sano", subgrupo: "Box Lunch", precio_persona: 375, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-CANAPES_6", nombre: "Canapés (6 piezas)", subgrupo: "Canapés", precio_persona: 600, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-CANAPES_8", nombre: "Canapés (8 piezas)", subgrupo: "Canapés", precio_persona: 680, por_hora: false, duracion_horas: 1, activo: true },
+    { clave: "AYB-COFFEE_BREAK_ESTANDAR", nombre: "Coffee break estándar (4 hrs)", subgrupo: "Coffee Breaks", precio_persona: 175, por_hora: false, activo: true },
+    { clave: "AYB-COFFEE_BREAK_PREMIUM", nombre: "Coffee break premium (8 hrs)", subgrupo: "Coffee Breaks", precio_persona: 640, por_hora: false, activo: true },
+    { clave: "AYB-SNACKS_ADICIONALES", nombre: "Snacks adicionales", subgrupo: "Coffee Breaks", precio_persona: 240, por_hora: false, activo: true },
+    { clave: "AYB-FOGATADA_ESTANDAR", nombre: "Fogatada estándar", subgrupo: "Fogatadas", precio_persona: 290, por_hora: false, duracion_horas: 1.5, activo: true },
+    { clave: "AYB-FOGATADA_PREMIUM", nombre: "Fogatada premium", subgrupo: "Fogatadas", precio_persona: 650, por_hora: false, duracion_horas: 2, activo: true },
+    { clave: "AYB-TORNA_FIESTA_BASICO", nombre: "Torna fiesta básico", subgrupo: "Torna Fiesta", precio_persona: 225, por_hora: false, duracion_horas: 2, minimo_personas: 15, activo: true },
+    { clave: "AYB-TORNA_FIESTA_PREMIUM", nombre: "Torna fiesta premium", subgrupo: "Torna Fiesta", precio_persona: 390, por_hora: false, duracion_horas: 2, minimo_personas: 15, activo: true },
+  ],
+  salones: [
+    { clave: "SAL-POR-SALON", nombre: "Por salón (Salones 1-4)", capacidad_por_montaje: {"Herradura": 14, "Escuela": 18, "Auditorio": 25, "Mesa Rusa": 20}, capacidad_maxima: 25, activo: true },
+    { clave: "SAL-SALON-5", nombre: "Salón 5", capacidad_por_montaje: {"Herradura": 17, "Escuela": 20, "Auditorio": 25, "Mesa Rusa": 22}, capacidad_maxima: 25, activo: true },
+    { clave: "SAL-CENTRO-AVANDARO", nombre: "Centro Avándaro", capacidad_por_montaje: {"Escuela": 90, "Auditorio": 120, "Redonda": 80, "Banquete": 120}, capacidad_maxima: 120, activo: true },
+  ],
   experiencias: [
     { clave: "ACT-CUATRIMOTO", nombre: "Cuatrimoto 2 horas", categoria: "Aventura y naturaleza", duracion_horas: 2, modo_cobro: "por_persona", precio_persona: 3200, cotizar_aparte: false, activo: true },
     { clave: "ACT-HIKING-BOSQUE", nombre: "Hiking en el bosque: cascadas, La Peña, miradores", categoria: "Aventura y naturaleza", duracion_horas: 3, modo_cobro: "por_tramo", tramos: [{ desde: 1, hasta: 25, monto: 1350 }, { desde: 26, hasta: 999, monto: 1280 }], maximo_personas: 999, nota: "El monto del último tramo parece ser por persona, pero su cotizador lo cobra plano. Confirmar con Avándaro.", cotizar_aparte: false, activo: true },
@@ -171,7 +205,8 @@ async function main() {
   const ESCENARIOS = [
     ["Convención corporativa, 80 personas, 2 días, 30 habitaciones, marzo (temporada alta, entre semana)",
      { fecha_inicio: "2027-03-16", personas: 80, dias: 2, habitaciones: 30, noches: 2,
-       espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-DOBLE" }],
+       espacio: "SALON-CENTRO", tipo_habitacion: "HAB-DOBLE",
+       alimentos: ["desayuno buffet", "coffee break", "comida buffet"] }],
 
     ["Boda de 150 personas en sábado de temporada alta, sin espacio indicado",
      { fecha_inicio: "2027-02-13", personas: 150, dias: 1, paquete_ayb: "PAQ-BANQUETE", montaje: "banquete" }],
@@ -261,7 +296,8 @@ async function main() {
   const hablado = await voz({
     fecha_inicio: "16 de marzo de 2027",
     personas: "80", dias: "2", habitaciones: "30", noches: "2",
-    espacio: "SALON-CENTRO", paquete_ayb: "PAQ-EJECUTIVO", tipo_habitacion: "HAB-DOBLE",
+    espacio: "SALON-CENTRO", tipo_habitacion: "HAB-DOBLE",
+    alimentos: "desayuno buffet, coffee break y comida buffet",
   });
   console.log(`\n  Cotización por voz →  HTTP ${hablado.estado}`);
   for (const [k, v] of Object.entries(hablado.cuerpo)) {
@@ -272,11 +308,11 @@ async function main() {
   // Lo que de verdad llega por teléfono: nadie dice "SALON-CENTRO" ni
   // "PAQ-EJECUTIVO" hablando.
   const HABLADAS = [
-    ["en palabras", { espacio: "Centro Avándaro", paquete_ayb: "paquete ejecutivo",
-                      tipo_habitacion: "doble" }],
-    ["a medias",    { paquete_ayb: "ejecutivo" }],
-    ["sin comida",  { espacio: "Centro Avándaro", paquete_ayb: "sin alimentos" }],
-    ["inventado",   { espacio: "Centro Avándaro", paquete_ayb: "paquete vegano premium" }],
+    ["en palabras", { espacio: "Centro Avándaro", tipo_habitacion: "doble",
+                      alimentos: "desayuno buffet, coffee break y comida buffet" }],
+    ["a medias",    { alimentos: "desayuno y comida" }],
+    ["sin comida",  { espacio: "Centro Avándaro", alimentos: "sin alimentos" }],
+    ["inventado",   { espacio: "Centro Avándaro", alimentos: "paquete vegano premium" }],
   ];
   for (const [etiqueta, extra] of HABLADAS) {
     const r = await voz({ fecha_inicio: "16 de marzo de 2027", personas: "80",
@@ -315,7 +351,7 @@ async function main() {
     ["Sería el 16 de marzo"],
     ["somos 80"],                                  // número suelto: solo cuenta porque se preguntó
     ["dos días, en el Centro Avándaro"],           // dos datos en un mensaje
-    ["el paquete ejecutivo"],                      // catálogo por alias
+    ["desayuno buffet, coffee break y comida buffet"],   // tres partidas en una frase
     ["sí, 30 habitaciones por 2 noches"],
   ];
 
@@ -329,15 +365,16 @@ async function main() {
     }
   }
 
-  // 742,322 con el modelo de impuestos del hotel. Antes eran 807,986,
-  // cuando el IVA se aplicaba también a la renta de espacio y la renta
-  // salía de una tarifa por salón que nos habíamos inventado.
+  // 602,938 con el tarifario y el modelo de impuestos del hotel. Antes
+  // eran 807,986, cuando el IVA se aplicaba también a la renta de
+  // espacio, la renta salía de una tarifa por salón inventada y los
+  // alimentos venían de un paquete inventado de 1,850 por persona.
   //
   //   espacio       4 bloques x 9,500 x 2 días      76,000.00
-  //   alimentos     296,000 x 1.31                 387,760.00
+  //   alimentos     189,600 x 1.31                 248,376.00
   //   hospedaje     226,260 x 1.20                 271,512.00
   //   propinas      30 hab                           7,050.00
-  const esperado = 742322;
+  const esperado = 602938;
   const bit = bitacora.filter((b) => b.origen === "whatsapp").pop();
   console.log(`\n  Resultado: folio ${ultimo.folio || "(ninguno)"} · ` +
     `total ${bit ? bit.total : "—"} · esperado ${esperado} · ` +

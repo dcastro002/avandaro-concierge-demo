@@ -153,15 +153,43 @@ export function extraer(texto, { esperando, catalogos: c, hoy } = {}) {
   }
 
   if (SIN_ALIMENTOS.test(t)) {
-    campos.paquete_ayb = null;          // dicho explícitamente, no es un olvido
+    campos.alimentos = null;            // dicho explícitamente, no es un olvido
   } else if (c) {
-    const paq = buscarEnCatalogo(t, c.paquetes, "clave", {
-      "\\b(coffee|cafe|cafecito|solo caf)": "PAQ-COFFEE",
-      "\\b(ejecutiv)": "PAQ-EJECUTIVO",
-      "\\b(banquete|cena de|boda)": "PAQ-BANQUETE",
-      "\\b(todo incluido|barra libre|open bar)": "PAQ-TODO",
-    });
-    if (paq) campos.paquete_ayb = paq;
+    // Varios servicios en una sola frase: "desayuno y comida buffet" son
+    // dos partidas, no una. Por eso no se usa buscarEnCatalogo, que
+    // devuelve una sola clave.
+    //
+    // El orden importa: lo más específico primero, porque "cena
+    // emplatada premium" también encaja con "cena".
+    const PISTAS_AYB = [
+      [/\bdesayuno\s+emplatad/, "AYB-DESAYUNO_EMPLATADO"],
+      [/\bdesayuno/, "AYB-DESAYUNO_BUFFET"],
+      [/\bcomida\s+emplatada\s+premium/, "AYB-COMIDA_EMPLATADO_PREMIUM"],
+      [/\bcomida\s+emplatad/, "AYB-COMIDA_EMPLATADO_ESTANDAR"],
+      [/\bcomida\b/, "AYB-COMIDA_BUFFET"],
+      [/\bcena\s+emplatada\s+premium/, "AYB-CENA_EMPLATADO_PREMIUM"],
+      [/\bcena\s+emplatad/, "AYB-CENA_EMPLATADO_ESTANDAR"],
+      [/\bcena\b/, "AYB-CENA_BUFFET"],
+      [/\b(coffee|cafe|cafecito|solo caf)/, "AYB-COFFEE_BREAK_ESTANDAR"],
+      [/\bbox\s*lunch/, "AYB-BOX_LUNCH_AVANDARO"],
+      [/\bcanap/, "AYB-CANAPES_6"],
+      [/\bbarra\s+(de\s+)?cerveza/, "AYB-BARRA_CERVEZAS"],
+      [/\b(barra\s+mix|vino y cerveza)/, "AYB-BARRA_MIX"],
+      [/\bbarra\s+sin\s+alcohol/, "AYB-BARRA_SIN_ALCOHOL"],
+      [/\b(hidrataci|aguas frescas)/, "AYB-BARRA_HIDRATACION"],
+      [/\bfogata/, "AYB-FOGATADA_ESTANDAR"],
+      [/\btorna\s*fiesta/, "AYB-TORNA_FIESTA_BASICO"],
+      [/\bsnack/, "AYB-SNACKS_ADICIONALES"],
+      [/\bdescorche/, "AYB-DESCORCHE"],
+    ];
+    const existe = new Set((c.alimentos ?? []).map((a) => a.clave));
+    const halladas = [];
+    for (const [patron, clave] of PISTAS_AYB) {
+      if (patron.test(t) && existe.has(clave) && !halladas.includes(clave)) {
+        halladas.push(clave);
+      }
+    }
+    if (halladas.length) campos.alimentos = halladas;
   }
 
   if (c) {
@@ -206,14 +234,14 @@ const PREGUNTAS = {
   fecha_inicio: "¿Para qué fecha sería el evento?",
   personas: "¿Cuántas personas calculan?",
   dias: "¿Cuántos días dura el evento?",
-  paquete_ayb: "¿Van a querer alimentos? Tenemos coffee break, paquete ejecutivo, banquete y todo incluido. Si no necesitan, me dice y lo cotizo solo con el espacio.",
+  alimentos: "¿Van a querer alimentos? Tenemos desayuno, comida y cena, buffet o emplatados, más coffee break, box lunch, canapés, barras de bebidas, fogatada y torna fiesta. Si no necesitan, me dice y lo cotizo solo con el espacio.",
   habitaciones: "¿Necesitan hospedaje? Si sí, dígame cuántas habitaciones y cuántas noches.",
 };
 
 export function siguientePregunta(datos, preguntado = []) {
-  for (const campo of ["fecha_inicio", "personas", "dias", "paquete_ayb", "habitaciones"]) {
+  for (const campo of ["fecha_inicio", "personas", "dias", "alimentos", "habitaciones"]) {
     const tieneValor = datos[campo] !== undefined;
-    const esOpcional = campo === "paquete_ayb" || campo === "habitaciones" || campo === "dias";
+    const esOpcional = campo === "alimentos" || campo === "habitaciones" || campo === "dias";
     if (tieneValor) continue;
     if (esOpcional && preguntado.includes(campo)) continue;   // se preguntó una vez, no se insiste
     return { campo, texto: PREGUNTAS[campo] };
@@ -234,9 +262,22 @@ export function textoCotizacion(c) {
   l.push(`${c.evento.personas} personas · ${c.evento.dias} día(s)` +
     (c.evento.habitaciones ? ` · ${c.evento.habitaciones} habitaciones × ${c.evento.noches} noche(s)` : ""));
   l.push("");
-  for (const d of c.desglose) l.push(`${d.concepto}: ${pesos(d.importe)}`);
+  // etiqueta cuando la hay: los alimentos son varias partidas y el
+  // concepto solo dice "Alimentos y bebidas" en todas.
+  for (const d of c.desglose) l.push(`${d.etiqueta ?? d.concepto}: ${pesos(d.importe)}`);
   for (const d of c.descuentos) l.push(`${d.descripcion}: −${pesos(d.importe)}`);
   if (c.importes.cargo_servicio) l.push(`Cargo por servicio: ${pesos(c.importes.cargo_servicio)}`);
+  // Las actividades con precio por tramo no tienen precio por persona, y
+  // decir "sin costo" cuando cuestan treinta y ocho mil pesos era
+  // exactamente el tipo de error que no se puede mandar a un cliente.
+  for (const e of c.experiencias || []) {
+    const unidad = e.modo_cobro === "por_tramo"
+      ? `monto cerrado para ${c.evento.personas} personas`
+      : e.precio_persona
+        ? `${pesos(e.precio_persona)} por persona`
+        : "sin costo";
+    l.push(`${e.nombre} (${unidad}): ${pesos(e.importe)}`);
+  }
   l.push("");
   l.push(`Subtotal: ${pesos(c.importes.subtotal)}`);
   l.push(`Impuestos: ${pesos(c.importes.iva + c.importes.ish)}`);
@@ -369,7 +410,7 @@ export async function responderConReglas(entrada, { cliente, cotizar, catalogos,
     habitaciones: st.datos.habitaciones ?? 0,
     noches: st.datos.noches ?? 0,
     espacio: st.datos.espacio ?? undefined,
-    paquete_ayb: st.datos.paquete_ayb ?? undefined,
+    alimentos: st.datos.alimentos ?? undefined,
     tipo_habitacion: st.datos.tipo_habitacion ?? undefined,
   };
 
@@ -453,8 +494,22 @@ const HERRAMIENTAS = [
         habitaciones: { type: "integer", description: "Habitaciones necesarias. 0 si no quieren hospedaje." },
         noches: { type: "integer", description: "Noches de hospedaje." },
         espacio: { type: "string", description: "Salón o espacio, con el nombre que usó el cliente. Omítelo si no lo mencionó: el sistema sugiere uno." },
-        paquete_ayb: { type: "string", description: "Paquete de alimentos como lo dijo el cliente. Omítelo solo si dijo que no quiere alimentos." },
+        alimentos: {
+          type: "array", items: { type: "string" },
+          description:
+            "Alimentos y bebidas que pidieron, con el nombre que usaron. Uno por cada servicio: " +
+            "desayuno buffet, comida emplatada, cena buffet, coffee break, box lunch, canapés, " +
+            "barra de cervezas, fogatada, torna fiesta. Usa ver_catalogo si no sabes cuál es cuál.",
+        },
+        paquete_ayb: { type: "string", description: "Solo si el cliente pidió un paquete cerrado por nombre. Para alimentos sueltos usa el campo alimentos." },
         tipo_habitacion: { type: "string", description: "Tipo de habitación, si lo mencionó." },
+        experiencias: {
+          type: "array", items: { type: "string" },
+          description:
+            "Actividades que pidieron, con el nombre que usaron. Por ejemplo circuito de energía, " +
+            "regata, muro de escalar, rally, coaching ejecutivo, hiking, cuatrimoto, RZR, " +
+            "Chi Kung, Wim Hof, ritual chamánico, baño de bosque, pizza a ciegas, coctelería.",
+        },
       },
       required: ["fecha_inicio", "personas"],
     },
@@ -551,9 +606,28 @@ function hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }) {
         ok: true,
         espacios: c.espacios.map((e) => ({ nombre: e.nombre, tipo: e.tipo, interior: e.interior,
           cabe_banquete: e.cap_banquete, cabe_coctel: e.cap_coctel, cabe_auditorio: e.cap_auditorio })),
-        paquetes: c.paquetes.map((p) => ({ nombre: p.nombre, incluye: p.incluye })),
         habitaciones: [...new Set(c.hospedaje.map((h) => h.nombre))],
-        instruccion: "No menciones precios de este catálogo aunque los veas.",
+        // Nada de esto lleva precio, a propósito: el modelo nunca ve una
+        // cifra. La cotización la emite cotizar_evento con el texto ya
+        // armado por nuestro código.
+        alimentos: (c.alimentos ?? []).map((a) => ({
+          nombre: a.nombre, tipo: a.subgrupo ?? "Comidas",
+          que_es: a.descripcion,
+          minimo_personas: a.minimo_personas ?? null,
+        })),
+        actividades: (c.experiencias ?? []).map((e) => ({
+          nombre: e.nombre, categoria: e.categoria,
+          duracion: e.duracion_horas ? `${e.duracion_horas} h` : e.duracion,
+          para_que: e.descripcion,
+          hasta_personas: e.maximo_personas ?? null,
+        })),
+        paquetes: c.paquetes.map((p) => ({ nombre: p.nombre, incluye: p.incluye })),
+        instruccion:
+          "No menciones precios de este catálogo aunque los veas: aquí no hay ninguno, " +
+          "y la cotización la manda cotizar_evento en un mensaje aparte. " +
+          "Puedes describir alimentos y actividades y agruparlos por lo que el cliente busca. " +
+          "Si una actividad trae hasta_personas y el grupo es más grande, dilo antes de ofrecerla. " +
+          "Nunca estimes una cifra tú.",
       } };
     }
 
@@ -573,8 +647,10 @@ function hacerEjecutor({ st, cliente, kb, cotizar, catalogos, wa_id, nombre }) {
       habitaciones: args.habitaciones ?? 0,
       noches: args.noches ?? (args.habitaciones ? 1 : 0),
       espacio: args.espacio || undefined,
+      alimentos: args.alimentos || undefined,
       paquete_ayb: args.paquete_ayb || undefined,
       tipo_habitacion: args.tipo_habitacion || undefined,
+      experiencias: args.experiencias || undefined,
     };
     Object.assign(st.datos, {
       fecha_inicio: peticion.fecha_inicio, personas: peticion.personas,
@@ -879,6 +955,70 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
     res.json({ ok: true, pruebas: salida });
   });
 
+  // ---------------------------------------------------------------------
+  // Salud del token de Meta
+  //
+  // Antes la única forma de saber si el token servía era escribirle al
+  // número y esperar. Eso ya nos costó una hora: el token temporal
+  // había expirado en menos de dos horas por estar atado a la sesión
+  // del navegador, y el síntoma fue un 401 sin más contexto.
+  //
+  // Esto hace un GET inofensivo al número y reporta si responde. Nunca
+  // devuelve el token ni parte de él, ni al que llama ni al log: solo
+  // cuántos caracteres mide, que basta para distinguir un token de
+  // sistema de uno temporal sin revelar nada.
+  // ---------------------------------------------------------------------
+  app.get("/whatsapp/meta/:token", async (req, res) => {
+    if (req.params.token !== token) return res.status(401).json({ error: "token inválido" });
+    if (!config.graphToken || !config.phoneNumberId) {
+      return res.json({ ok: false,
+        motivo: "Falta WA_GRAPH_TOKEN o WA_PHONE_ID en el entorno." });
+    }
+
+    const version = config.graphVersion || process.env.WA_GRAPH_VERSION || "v25.0";
+    const campos = "display_phone_number,verified_name,quality_rating,platform_type";
+    const url = `https://graph.facebook.com/${version}/${config.phoneNumberId}` +
+                `?fields=${campos}`;
+    try {
+      const r = await fetch(url, {
+        headers: { Authorization: `Bearer ${config.graphToken}` },
+        signal: AbortSignal.timeout(10000),
+      });
+      const cuerpo = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const e = cuerpo?.error ?? {};
+        return res.json({
+          ok: false,
+          http: r.status,
+          codigo: e.code ?? null,
+          subcodigo: e.error_subcode ?? null,
+          mensaje: e.message ?? null,
+          // 190 con subcódigo 463 es exactamente el caso de un token
+          // temporal vencido, y conviene nombrarlo en lugar de dejar
+          // que alguien lo confunda con permisos faltantes.
+          pista: e.code === 190
+            ? (e.error_subcode === 463
+                ? "El token venció. Si es temporal, dura lo que la sesión del navegador: hay que generar uno de sistema sin vencimiento."
+                : "Token inválido o revocado.")
+            : e.code === 200 ? "El token es válido pero le faltan permisos sobre este número."
+            : null,
+          largo_del_token: String(config.graphToken).length,
+        });
+      }
+      res.json({
+        ok: true,
+        numero: cuerpo.display_phone_number ?? null,
+        nombre: cuerpo.verified_name ?? null,
+        calidad: cuerpo.quality_rating ?? null,
+        tipo: cuerpo.platform_type ?? null,
+        version_graph: version,
+        largo_del_token: String(config.graphToken).length,
+      });
+    } catch (e) {
+      res.json({ ok: false, motivo: `No se pudo consultar a Meta: ${e.message}` });
+    }
+  });
+
   // Alta del webhook en el panel de Meta.
   app.get("/whatsapp/webhook", (req, res) => {
     if (req.query["hub.mode"] === "subscribe" &&
@@ -980,5 +1120,8 @@ export function montar(app, { cliente, kb, token, cotizar, catalogos, config = {
     "POST /whatsapp/webhook  (firmado)",
     "POST /whatsapp/simular/:token",
     "GET  /whatsapp/modelos/:token",
+    "GET  /whatsapp/probar/:token",
+    "GET  /whatsapp/kb/:token",
+    "GET  /whatsapp/meta/:token  (salud del token de Meta)",
   ];
 }
