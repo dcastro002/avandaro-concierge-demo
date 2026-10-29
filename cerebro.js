@@ -25,9 +25,17 @@
 // está probada. Esto es una mejora, no una dependencia.
 // =====================================================================
 
-const RAIZ = "https://generativelanguage.googleapis.com/v1beta";
+// Por variable para poder apuntarlo a un servidor falso en las pruebas.
+// Sin esto no había forma de ejercitar los caminos de falla (vacío, 429,
+// 503) sin pegarle a Google, y justamente uno de esos caminos nos falló
+// en vivo sin que ninguna prueba lo cubriera.
+const RAIZ = process.env.GEMINI_RAIZ || "https://generativelanguage.googleapis.com/v1beta";
 
-export const MODELO_POR_DEFECTO = process.env.GEMINI_MODELO || "gemini-2.0-flash";
+// El default era gemini-2.0-flash, que Google ya no sirve a cuentas
+// nuevas. Si alguien desplegaba sin GEMINI_MODELO, el modelo principal
+// fallaba siempre y solo trabajaban los respaldos, más lento y sin que
+// nadie supiera por qué.
+export const MODELO_POR_DEFECTO = process.env.GEMINI_MODELO || "gemini-3.5-flash";
 
 export function disponible() {
   return Boolean(process.env.GEMINI_API_KEY);

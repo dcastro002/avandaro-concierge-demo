@@ -322,7 +322,10 @@ export function avisosChat(c) {
 // ---------------------------------------------------------------------
 // El hilo
 // ---------------------------------------------------------------------
-const ESTADOS = new Map();          // respaldo en memoria, por si falla Supabase
+// Respaldo en memoria, por si falla Supabase. Se exporta nada más para
+// que las pruebas puedan sembrar un hilo ya abierto sin inventar una
+// base de datos.
+export const ESTADOS = new Map();
 const VIVE_MS = 6 * 60 * 60 * 1000; // seis horas sin escribir y la conversación se da por cerrada
 
 function estadoNuevo(wa_id) {
@@ -767,11 +770,17 @@ export async function responderConIA(entrada, { cliente, kb, cotizar, catalogos,
   // mientras el modelo redactaba, y aquí solo queda su comentario.
   // Sin esa vía (el simulador), se devuelve todo junto y en orden.
   const mensajes = emitir ? [...salida.mensajes] : [...salida.directos, ...salida.mensajes];
-  if (!mensajes.length && !salida.directos.length) {
+
+  // vacio marca que el modelo no devolvió nada utilizable: ni texto ni
+  // herramientas. No es un error, así que no lanza, y antes eso hacía
+  // que el despachador no se enterara y la capa de reglas nunca entrara.
+  // El que decide qué hacer con esto es responder(), no esta función.
+  const vacio = !mensajes.length && !salida.directos.length;
+  if (vacio) {
     mensajes.push("Disculpe, no entendí. ¿Me repite qué necesita?");
   }
 
-  return { mensajes, estado: st, via: "gemini", herramientas: salida.usadas };
+  return { mensajes, estado: st, via: "gemini", vacio, herramientas: salida.usadas };
 }
 
 // Despacho.
@@ -791,7 +800,27 @@ export async function responder(entrada, deps) {
   const hiloAbierto = (st.historial?.length ?? 0) > 0;
 
   try {
-    return await responderConIA(entrada, deps);
+    const r = await responderConIA(entrada, deps);
+
+    // Un modelo que devuelve vacío falla igual que uno que truena, nada
+    // más que sin avisar. Esto ya pasó en vivo: llegó un mensaje con
+    // fecha, personas, días, alimentos y habitaciones, el modelo no
+    // devolvió nada, y el cliente recibió "no entendí" teniendo las
+    // reglas a un paso y todo lo necesario para cotizar.
+    if (r.vacio && !hiloAbierto) {
+      console.log("El modelo no devolvió nada en un hilo nuevo: contesta la capa de reglas.");
+      const porReglas = await responderConReglas(entrada, deps);
+
+      // El historial se borra a propósito. Las dos capas comparten el
+      // mismo objeto de estado, así que el mensaje ya quedó guardado
+      // con una respuesta vacía del modelo. Si se deja, en la vuelta
+      // siguiente el modelo lo ve y actúa sobre algo que las reglas ya
+      // atendieron: así fue como un "Hola" acabó emitiendo la
+      // cotización completa de un mensaje de media hora antes.
+      if (porReglas.estado) porReglas.estado.historial = [];
+      return porReglas;
+    }
+    return r;
   } catch (e) {
     console.error("El cerebro falló:", e.message);
     if (!hiloAbierto) {
