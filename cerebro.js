@@ -67,21 +67,37 @@ const LIMITE_MS = Number(process.env.GEMINI_TIMEOUT_MS || 18000);
 
 // Modelos de respaldo. Una saturación momentánea de Google no debería
 // tumbar la conversación: se reintenta con otro modelo antes de rendirse.
-export const RESPALDOS = (process.env.GEMINI_MODELOS_RESPALDO || "gemini-3.1-flash-lite")
+export const RESPALDOS = (process.env.GEMINI_MODELOS_RESPALDO ||
+  "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.6-flash")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
 const TRANSITORIO = new Set([429, 500, 502, 503, 504]);
+const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Dos intentos por modelo antes de pasar al siguiente.
+//
+// Un 503 de Google suele durar menos de un segundo: reintentar el mismo
+// modelo lo resuelve y la conversación no cambia de voz a media charla.
+// Un 429 es otra cosa, es nuestra cuota, y ahí el reintento solo sirve
+// para no tropezar con un pico; si la llave está topada, va a volver.
 async function generarConRespaldo(cuerpo, modelos, llave) {
   let ultimo;
   for (let i = 0; i < modelos.length; i++) {
-    try {
-      return await generar(cuerpo, modelos[i], llave);
-    } catch (e) {
-      ultimo = e;
-      const vale = TRANSITORIO.has(e.estado) || /no contestó en/.test(e.message);
-      if (!vale || i === modelos.length - 1) throw e;
-      console.log(`${modelos[i]} falló (${e.estado ?? "tiempo"}); se reintenta con ${modelos[i + 1]}.`);
+    for (let intento = 0; intento < 2; intento++) {
+      try {
+        return await generar(cuerpo, modelos[i], llave);
+      } catch (e) {
+        ultimo = e;
+        const vale = TRANSITORIO.has(e.estado) || /no contestó en/.test(e.message);
+        if (!vale) throw e;
+        if (intento === 0) {
+          await espera(e.estado === 429 ? 1500 : 700);
+          continue;
+        }
+        if (i < modelos.length - 1) {
+          console.log(`${modelos[i]} falló (${e.estado ?? "tiempo"}) dos veces; paso a ${modelos[i + 1]}.`);
+        }
+      }
     }
   }
   throw ultimo;
